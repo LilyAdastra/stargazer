@@ -4,7 +4,7 @@
 Stores minimal user state in a tamper-proof cookie using itsdangerous.
 No server-side session store — the cookie is the session.
 
-spec: [docs/architecture/landing.md](../docs/architecture/landing.md)
+spec: [docs/architecture/app.md](../docs/architecture/app.md)
 """
 
 from dataclasses import asdict, dataclass
@@ -22,6 +22,7 @@ class SessionData:
 
     github_username: str
     github_id: int
+    notebook_url: str | None = None
 
 
 def create_session_cookie(data: SessionData, secret: str) -> str:

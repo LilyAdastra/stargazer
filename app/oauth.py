@@ -4,7 +4,7 @@
 Handles the authorization URL construction, code-for-token exchange,
 and authenticated user profile fetch against the GitHub API.
 
-spec: [docs/architecture/landing.md](../docs/architecture/landing.md)
+spec: [docs/architecture/app.md](../docs/architecture/app.md)
 """
 
 import urllib.parse

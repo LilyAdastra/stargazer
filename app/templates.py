@@ -1,95 +1,39 @@
 """
-### HTML templates for the landing page.
+### HTML template loaders.
 
-Plain Python functions returning HTML strings. No Jinja dependency —
-the landing page is simple enough that f-strings suffice.
+Reads templates from `app/templates/` and substitutes placeholders using
+`string.Template` (`$name` syntax — leaves CSS `{...}` untouched). No Jinja
+dependency; templates are loaded once at module import.
 
-spec: [docs/architecture/landing.md](../docs/architecture/landing.md)
+spec: [docs/architecture/app.md](../docs/architecture/app.md)
 """
 
+from pathlib import Path
+from string import Template
 
-def _base(title: str, body: str) -> str:
-    """Wrap body content in the base HTML shell."""
-    return f"""\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{title} — Stargazer</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-                         Helvetica, Arial, sans-serif;
-            background: #0d1117;
-            color: #c9d1d9;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }}
-        .card {{
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 12px;
-            padding: 2.5rem;
-            max-width: 420px;
-            width: 100%;
-            text-align: center;
-        }}
-        h1 {{ color: #f0f6fc; margin-bottom: 0.5rem; font-size: 1.6rem; }}
-        p {{ margin-bottom: 1.5rem; line-height: 1.5; font-size: 0.95rem; }}
-        .btn {{
-            display: inline-block;
-            padding: 0.75rem 1.5rem;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: 600;
-            font-size: 0.95rem;
-            transition: opacity 0.15s;
-        }}
-        .btn:hover {{ opacity: 0.85; }}
-        .btn-github {{ background: #238636; color: #fff; }}
-        .btn-notebook {{ background: #1f6feb; color: #fff; }}
-        .user-info {{
-            margin-bottom: 1.5rem;
-            font-size: 0.9rem;
-            color: #8b949e;
-        }}
-        .actions {{ display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }}
-        .logout {{ color: #8b949e; font-size: 0.8rem; margin-top: 1rem; }}
-        .logout a {{ color: #8b949e; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        {body}
-    </div>
-</body>
-</html>"""
+
+_TEMPLATES = Path(__file__).parent / "templates"
+_BASE = Template((_TEMPLATES / "base.html").read_text())
+_LOGIN_BODY = (_TEMPLATES / "login.html").read_text()
+_DASHBOARD_BODY = Template((_TEMPLATES / "dashboard.html").read_text())
+_PROVISIONING_BODY = Template((_TEMPLATES / "provisioning.html").read_text())
 
 
 def login_html() -> str:
     """Landing page with GitHub sign-in button."""
-    return _base(
-        "Sign In",
-        """\
-        <h1>Stargazer</h1>
-        <p>Interactive bioinformatics workflows powered by Flyte.</p>
-        <a href="/auth/login" class="btn btn-github">Sign in with GitHub</a>""",
-    )
+    return _BASE.substitute(title="Sign In", body=_LOGIN_BODY)
 
 
-def dashboard_html(github_username: str) -> str:
-    """Post-login dashboard linking to the co-located notebook."""
-    return _base(
-        "Dashboard",
-        f"""\
-        <h1>Stargazer</h1>
-        <div class="user-info">Signed in as <strong>{github_username}</strong></div>
-        <div class="actions">
-            <a href="/nb/" class="btn btn-notebook">Open Notebook</a>
-        </div>
-        <div class="logout"><a href="/auth/logout">Sign out</a></div>""",
+def dashboard_html(github_username: str, notebook_url: str) -> str:
+    """Post-login dashboard linking to the user's per-project notebook."""
+    body = _DASHBOARD_BODY.substitute(
+        github_username=github_username,
+        notebook_url=notebook_url,
     )
+    return _BASE.substitute(title="Dashboard", body=body)
+
+
+def provisioning_html(github_username: str) -> str:
+    """Interim page shown while the user's notebook app is being deployed."""
+    body = _PROVISIONING_BODY.substitute(github_username=github_username)
+    return _BASE.substitute(title="Setting Up", body=body)

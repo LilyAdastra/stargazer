@@ -25,22 +25,16 @@ bio = [
     "igraph>=1.0.0",
     "pooch>=1.9.0",
 ]
-notebook = ["marimo>=0.10.0"]
+notebook = ["marimo>=0.10.0", "stargazer[bio]"]
 mcp = ["mcp[cli]>=1.0.0"]
-landing = [
-    "fastapi>=0.115",
-    "uvicorn>=0.34",
-    "itsdangerous>=2.1",
-    "httpx>=0.27",
-    "websockets>=13",
-]
+landing = ["fastapi>=0.115", "uvicorn>=0.34", "itsdangerous>=2.1"]
 docs = ["mkdocstrings[python]>=1.0.3"]
-app = ["stargazer[bio,notebook,landing]"]
-all = ["stargazer[bio,notebook,mcp,landing,docs]"]
+app = ["stargazer[notebook,landing]"]
+all = ["stargazer[notebook,mcp,landing,docs]"]
 
 [project.scripts]
 stargazer = "stargazer.server:main"
-stargazer-app = "app:main"
+stargazer-app = "app.admin_app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -62,6 +56,7 @@ include = ["stargazer*", "app*"]
 
 [tool.setuptools.package-data]
 stargazer = ["bundles/*.yaml", "notebooks/*.py"]
+app = ["templates/*.html"]
 
 [dependency-groups]
 dev = [

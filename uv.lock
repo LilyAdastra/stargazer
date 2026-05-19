@@ -3246,7 +3246,6 @@ dependencies = [
 all = [
     { name = "anndata" },
     { name = "fastapi" },
-    { name = "httpx" },
     { name = "igraph" },
     { name = "itsdangerous" },
     { name = "marimo" },
@@ -3256,12 +3255,10 @@ all = [
     { name = "scanpy" },
     { name = "scikit-image" },
     { name = "uvicorn" },
-    { name = "websockets" },
 ]
 app = [
     { name = "anndata" },
     { name = "fastapi" },
-    { name = "httpx" },
     { name = "igraph" },
     { name = "itsdangerous" },
     { name = "marimo" },
@@ -3269,7 +3266,6 @@ app = [
     { name = "scanpy" },
     { name = "scikit-image" },
     { name = "uvicorn" },
-    { name = "websockets" },
 ]
 bio = [
     { name = "anndata" },
@@ -3283,16 +3279,19 @@ docs = [
 ]
 landing = [
     { name = "fastapi" },
-    { name = "httpx" },
     { name = "itsdangerous" },
     { name = "uvicorn" },
-    { name = "websockets" },
 ]
 mcp = [
     { name = "mcp", extra = ["cli"] },
 ]
 notebook = [
+    { name = "anndata" },
+    { name = "igraph" },
     { name = "marimo" },
+    { name = "pooch" },
+    { name = "scanpy" },
+    { name = "scikit-image" },
 ]
 
 [package.dev-dependencies]
@@ -3313,7 +3312,6 @@ requires-dist = [
     { name = "anndata", marker = "extra == 'bio'", specifier = ">=0.12.10" },
     { name = "fastapi", marker = "extra == 'landing'", specifier = ">=0.115" },
     { name = "flyte", extras = ["tui"], specifier = ">=2.0.3" },
-    { name = "httpx", marker = "extra == 'landing'", specifier = ">=0.27" },
     { name = "igraph", marker = "extra == 'bio'", specifier = ">=1.0.0" },
     { name = "itsdangerous", marker = "extra == 'landing'", specifier = ">=2.1" },
     { name = "loguru", specifier = ">=0.7.3" },
@@ -3324,11 +3322,11 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scanpy", marker = "extra == 'bio'", specifier = ">=1.12" },
     { name = "scikit-image", marker = "extra == 'bio'", specifier = ">=0.26.0" },
-    { name = "stargazer", extras = ["bio", "notebook", "landing"], marker = "extra == 'app'" },
-    { name = "stargazer", extras = ["bio", "notebook", "mcp", "landing", "docs"], marker = "extra == 'all'" },
+    { name = "stargazer", extras = ["bio"], marker = "extra == 'notebook'" },
+    { name = "stargazer", extras = ["notebook", "landing"], marker = "extra == 'app'" },
+    { name = "stargazer", extras = ["notebook", "mcp", "landing", "docs"], marker = "extra == 'all'" },
     { name = "tinydb", specifier = ">=4.8.2" },
     { name = "uvicorn", marker = "extra == 'landing'", specifier = ">=0.34" },
-    { name = "websockets", marker = "extra == 'landing'", specifier = ">=13" },
 ]
 provides-extras = ["bio", "notebook", "mcp", "landing", "docs", "app", "all"]
 

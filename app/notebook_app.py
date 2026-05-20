@@ -32,7 +32,12 @@ from stargazer.config import STARGAZER_ENV_VARS
 _NOTEBOOK_IMAGE = f"{os.environ['STARGAZER_REGISTRY']}/stargazer-note:latest"
 
 # Path inside the stargazer-note image (Dockerfile sets WORKDIR /stargazer).
-_NOTEBOOK_PATH_IN_IMAGE = "src/stargazer/notebooks/tutorials/scrna_tutorial.py"
+_NOTEBOOK_PATH_IN_IMAGE = "src/stargazer/notebooks/tutorials/preprocessing_tutorial.py"
+
+# Domain is constant across users; project is injected per-user in provision.py
+# before each `serve.aio()` call so the notebook can `flyte.init_in_cluster()`
+# pointed at the right project for downstream `flyte.run(...)` submissions.
+_NOTEBOOK_FLYTE_CONTEXT = {"FLYTE_DOMAIN": "development"}
 
 
 notebook_env = flyte.app.AppEnvironment(
@@ -53,5 +58,5 @@ notebook_env = flyte.app.AppEnvironment(
     port=8080,
     requires_auth=False,
     resources=flyte.Resources(memory=("2Gi", "6Gi")),
-    env_vars=STARGAZER_ENV_VARS,
+    env_vars={**STARGAZER_ENV_VARS, **_NOTEBOOK_FLYTE_CONTEXT},
 )

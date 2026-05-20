@@ -10,6 +10,10 @@
 - Do not make any git commits unless explicitly requested
 - The README is a document written exclusively BY HUMANS FOR HUMANS. Never modify the README. Notify if it is out of spec only.
 
+**Positioning**
+- The marimo notebook is Stargazer's primary user surface for both experimentation (`marimo edit`) and reproducible production (`marimo run`). `src/stargazer/tasks/` and `src/stargazer/workflows/` are the maintainer-facing primitive layer — end users rarely import from them directly. Default new feature designs to the notebook surface (marimo, `mo.ui`) over CLI or other entry points.
+- Two top-level packages: `src/stargazer/` is the bioinformatics SDK (tasks, workflows, assets, TaskEnvironment configs). `app/` at repo root is the deployment / web tier (FastAPI apps, `flyte.app.AppEnvironment` definitions, OAuth/session helpers, HTML templates, deploy entrypoints). When asked to add a deploy entrypoint, FastAPI route, AppEnvironment for a hosted service, OAuth integration, or any other non-SDK runtime code, it goes under `app/`.
+
 **Dev Process**
 - You will implement features piece by piece in a sequential fashion
 - Handle a single case well at first instead of trying to anticipate every way the app will be used
@@ -19,6 +23,7 @@
 - Tests will run until they pass
 - All necessary CLI tools e.g. parabricks, bwa etc, are available in PATH. Use them to generate test assets as needed and alert the user if they are not available.
 - When adding a task that wraps a new CLI tool, check the `TaskEnvironment` it is decorated against in `src/stargazer/config.py` and confirm the tool is layered onto that env's `flyte.Image` (via `with_apt_packages`, `with_commands`, or the bioconda block in `_BIOCONDA_INSTALL`). If it is missing, add it and notify the user.
+- When defining a new `TaskEnvironment` in `src/stargazer/config.py`, always call `.with_uv_project(PROJECT_ROOT / "pyproject.toml")` on its image so the stargazer package and its pip deps end up installed, and set explicit `resources=` (e.g. `flyte.Resources(memory=("2Gi", "6Gi"))`). The devbox node has a hard ~7.5 GiB memory budget — see `.opencode/reference/devbox_workarounds.md`.
 - **CRITICAL** Do not consider backwards compatibility unless explicitly requested!
 - Run `ruff --fix` after every set of changes to satisfy the pre-commit
 
@@ -97,12 +102,14 @@ The `spec:` line is **module-level only** — class and function docstrings do n
 - **`.opencode/plans/`** - Step by step instructions for building new features and fixing bugs
   - Only place outside src where code snippets are allowed
   - Keep track of progress and check off completed work as you go
+  - **Prefix every new plan file with the next sequential two-digit integer** so the landing order is visible at a glance and sorts correctly in `ls`: `15_initial_thing.md`, `16_next_thing.md`, `17_followup.md`. Pick the next number by looking at the highest existing prefix across both the top level AND `archive/` (archive is numbered chronologically, top-level continues from where it left off). Do not renumber `future/` until those plans are activated.
 
 ## Project Structure
 
 ### Directory Organization
 
 The project follows this structure:
+- `app/` - Deployment / web tier (FastAPI apps, `flyte.app.AppEnvironment` definitions, OAuth + session helpers, HTML templates, deploy entrypoints). Installed alongside the main package via `[tool.setuptools.packages.find] where = ["src", "."]`. Uvicorn import path is `app:asgi_app`; deploy entry is `app:main`.
 - `src/stargazer/` - Main package
   - `__init__.py` - Package root, re-exports key symbols
   - `config.py` - Centralized configuration, env var defaults, TaskEnvironment definitions (`gatk_env`, `scrna_env`), logger setup

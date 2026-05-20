@@ -38,7 +38,7 @@ FROM base AS note
 RUN uv sync --extra notebook && chown -R ubuntu:ubuntu /stargazer
 USER ubuntu
 RUN flyte create config --local-persistence
-ENTRYPOINT ["marimo", "edit", "src/stargazer/notebooks/tutorials/scrna_tutorial.py", \
+ENTRYPOINT ["marimo", "edit", "src/stargazer/notebooks/tutorials/preprocessing_tutorial.py", \
     "--port", "8080", "--host", "0.0.0.0", "--headless", "--no-token"]
 
 # --- Chat target (agentic interface to the MCP server) ---

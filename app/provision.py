@@ -64,9 +64,15 @@ async def provision_user(github_username: str) -> str:
 
     await _ensure_project(project_id, github_username)
 
-    app = await flyte.with_servecontext(
-        project=project_id, domain=DOMAIN
-    ).serve.aio(notebook_env)
+    # Bake the user's project into the notebook pod's env so the tutorial can
+    # call `flyte.init_in_cluster(project=..., domain=...)` and submit runs
+    # to the right project. `with_servecontext(project=...)` controls where
+    # the App pod is deployed, not what its in-pod client points at.
+    notebook_env.env_vars["FLYTE_PROJECT"] = project_id
+
+    app = await flyte.with_servecontext(project=project_id, domain=DOMAIN).serve.aio(
+        notebook_env
+    )
 
     # `App.endpoint` is the user-facing public URL; `App.url` is the in-cluster
     # Flyte console URL (mis-named in the SDK).

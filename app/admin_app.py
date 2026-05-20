@@ -306,6 +306,12 @@ def _port_open(host: str, port: int) -> bool:
 
 def main():
     """Deploy the admin landing app to Flyte."""
+    missing = [name for name in _SECRET_NAMES if not os.environ.get(name)]
+    if missing:
+        raise SystemExit(
+            f"Missing required env vars: {', '.join(missing)}. "
+            f"Export them before deploying."
+        )
     init(root_dir=PROJECT_ROOT)
     _start_storage_port_forward()
     _build_and_push_notebook_image()

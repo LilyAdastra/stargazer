@@ -84,6 +84,16 @@ docker exec flyte-devbox kubectl rollout restart deployment/flyte-binary -n flyt
 
 ---
 
+## `flyte create project` (and any CLI subprocess) fails inside App pods
+
+**Symptom:** Shelling out to `flyte create project ...` (or any `flyte` CLI command) from inside a running App pod raises `InitializationError` / `Client has not been initialized` immediately, even though the same pod's in-process Python SDK works fine.
+
+**Cause:** Same root as the previous entry — the pod's Flyte connection is auto-discovered from `_U_EP_OVERRIDE` and friends at *Python process startup* by `flyte.init_in_cluster()`. A fresh subprocess inherits those env vars but does not run the discovery logic before its first SDK call, so `ensure_client()` raises. The Flyte v2 docs at `core-concepts/projects-and-domains` further claim that "the Python SDK provides read-only access to projects, to create or modify projects use the `flyte` CLI or the UI" — this is **wrong against the installed SDK**, `flyte.remote.Project.create(...)` exists and is what the CLI itself calls under the hood.
+
+**Workaround:** When provisioning Flyte resources from inside an App pod, always prefer the in-process SDK (`Project.create.aio(...)`, `Project.get.aio(...)`, etc.) over CLI subprocesses. The pod's auto-discovered endpoint is only available to the parent Python process. Trust the SDK's actual surface over the v2 docs when they disagree. See `app/provision.py` for the working pattern.
+
+---
+
 ## Node has ~8 GiB allocatable memory
 
 **Symptom:** OOM-killed pods when concurrent tasks exceed combined memory budget.

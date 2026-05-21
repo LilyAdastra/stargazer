@@ -53,4 +53,4 @@ marimo "${MODE}" --sandbox "${NOTEBOOK_PATH}" \
   --port 8081 --host 127.0.0.1 --headless --no-token &
 MARIMO_PID=$!
 
-exec uvicorn app.proxy:asgi_app --host 0.0.0.0 --port 8080
+exec uvicorn sg_proxy:asgi_app --host 0.0.0.0 --port 8080

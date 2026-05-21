@@ -56,7 +56,11 @@ from app.github import fork_upstream, list_workspace as gh_list_workspace
 from app.init import init
 from app.notebooks import WORKSPACE_NOTEBOOK_DIR, Notebook, by_section, by_slug
 from app.oauth import exchange_code, get_github_user, github_auth_url
-from app.per_notebook import notebook_app_img, per_notebook_env
+from app.per_notebook import (
+    NOTEBOOK_IMAGE_URI,
+    notebook_app_img_recipe,
+    per_notebook_env,
+)
 from app.provision import provision_user, sanitize_project_id
 from app.session import (
     SESSION_COOKIE,
@@ -398,7 +402,16 @@ async def launch(
         project=project, domain="development"
     ).serve.aio(env)
     _launched[session.github_username].add((slug, mode))
-    return RedirectResponse(deployment.endpoint, status_code=303)
+
+    # Hand off the signed session as a one-shot query param. The admin and the
+    # per-notebook live on sibling subdomains; browsers won't share the
+    # admin's host-only cookie with the per-notebook host, and `Domain=` on
+    # a bare TLD-like parent (`localhost`) is unreliable across browsers. The
+    # proxy validates `sg_launch` on first hit, sets its own host-only
+    # cookie, and 302s back to the clean URL.
+    launch_token = request.cookies.get(SESSION_COOKIE, "")
+    handoff = f"{deployment.endpoint}?sg_launch={launch_token}"
+    return RedirectResponse(handoff, status_code=303)
 
 
 @asgi_app.get("/health")
@@ -413,7 +426,7 @@ async def health():
 
 
 def _build_and_push_notebook_image() -> None:
-    """Build and push the `notebook-app` image used by per-notebook apps.
+    """Build the per-notebook recipe and publish it under a stable tag.
 
     The admin pod cannot build images itself, so the deployer's machine
     must publish `notebook-app` to `STARGAZER_REGISTRY` before any
@@ -421,12 +434,32 @@ def _build_and_push_notebook_image() -> None:
     AppEnvironment image reference resolves at pod-pull time, not at
     deploy time.
 
-    Image spec is the programmatic `flyte.Image` in
-    `app/per_notebook.py`; `flyte.build` content-addresses it and pushes
-    to the registry baked into the image config.
+    `flyte.build` produces a content-hashed URI; we then retag that
+    manifest as `NOTEBOOK_IMAGE_URI` (`.../notebook-app:stable`) via
+    `docker buildx imagetools create` so the multi-arch manifest is
+    preserved without re-pulling. Per-notebook AppEnvironments reference
+    the stable tag (`Image.from_base(NOTEBOOK_IMAGE_URI)`) so the admin
+    pod never needs to recompute the content hash from in-pod Python
+    state.
     """
-    logger.info("Building per-notebook flyte.Image")
-    flyte.build(notebook_app_img)
+    logger.info("Building per-notebook flyte.Image (recipe)")
+    result = flyte.build(notebook_app_img_recipe)
+    if result.uri is None:
+        raise RuntimeError("flyte.build did not return an image URI")
+    logger.info(f"Retagging {result.uri} as {NOTEBOOK_IMAGE_URI}")
+    subprocess.run(
+        [
+            "docker",
+            "buildx",
+            "imagetools",
+            "create",
+            "-t",
+            NOTEBOOK_IMAGE_URI,
+            result.uri,
+        ],
+        check=True,
+    )
+    logger.info(f"Per-notebook image published at {NOTEBOOK_IMAGE_URI}")
 
 
 def _start_storage_port_forward() -> None:

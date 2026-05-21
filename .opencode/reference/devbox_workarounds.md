@@ -123,3 +123,15 @@ Not strictly devbox-specific but bites on every devbox deploy.
 **Workaround:** Add `include=("dir/",)` (relative to the file where the env is instantiated) to the `AppEnvironment` / `TaskEnvironment`. Prefer `Path(__file__).parent / "asset_dir"` over `importlib.resources.files("pkg")` for asset lookup.
 
 Related Python-side gotcha: modules imported only inside function bodies are excluded from Flyte's static-analysis code bundle. Make them statically reachable (e.g. import in the package `__init__.py`) or add to `include`.
+
+---
+
+## Flyte's code bundle shadows image-baked top-level packages
+
+Not strictly devbox-specific. Bites any AppEnvironment whose image bakes a Python module under a package name that the deployer's process also imports from.
+
+**Symptom:** `uvicorn <pkg>.<mod>:asgi_app` fails inside the pod with `ERROR: Error loading ASGI app. Could not import module "<pkg>.<mod>"`, even though `<pkg>/<mod>.py` is verifiably present at the image-baked path (e.g. `/usr/local/lib/app/proxy.py`) and `PYTHONPATH` includes that directory.
+
+**Cause:** Flyte's `loaded_modules` bundler ships every `.py` file imported by the deploying Python process into the pod's WORKDIR (`/home/flyte`). If that bundle includes a `<pkg>/__init__.py` (because the deployer imports `<pkg>.something_else`), the unpacked `/home/flyte/<pkg>/` shadows the image-baked `/usr/local/lib/<pkg>/` on `sys.path` — Python's cwd entry (`''`) comes before `PYTHONPATH`. The cwd version doesn't contain the baked module that wasn't separately imported by the deployer, so the import fails.
+
+**Workaround:** Bake the runtime-only file as a TOP-LEVEL module under a name the deployer doesn't import. E.g. `/usr/local/lib/sg_proxy.py` (not `/usr/local/lib/app/proxy.py`); reference it as `uvicorn sg_proxy:asgi_app`. The top-level slot is free; only package directories collide.

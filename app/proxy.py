@@ -17,9 +17,13 @@ Two reserved paths the proxy handles itself instead of forwarding:
   into env_vars at deploy time. Called by the launch script's SIGTERM
   hook on idle-down, and exposed to the admin app as a "save" affordance.
 
-Self-contained on purpose: the `note` image installs only `fastapi`,
+Self-contained on purpose: the notebook image installs only `fastapi`,
 `uvicorn`, `itsdangerous`, `httpx`, `websockets` at system level and
-COPYs this single file in — no stargazer or app-package install needed.
+COPYs this single file in as `/usr/local/lib/sg_proxy.py` — no
+stargazer or app-package install needed, and the top-level module
+name avoids colliding with Flyte's loaded_modules code bundle which
+ships an `app/` package into the pod's `/home/flyte` cwd at deploy
+time.
 
 spec: [docs/architecture/app.md](../docs/architecture/app.md)
 """
@@ -28,16 +32,18 @@ import asyncio
 import os
 import subprocess
 from pathlib import Path
+from urllib.parse import urlencode
 
 import httpx
 import websockets
 from fastapi import FastAPI, Request, Response, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 
 SESSION_COOKIE = "sg_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days, matches app.session
+LAUNCH_QUERY_PARAM = "sg_launch"
 MARIMO_HOST = "127.0.0.1"
 MARIMO_HTTP_PORT = 8081
 WORKSPACE_ROOT = Path("/workspace")
@@ -61,6 +67,35 @@ def _cookie_is_valid(cookie_value: str | None) -> bool:
         return True
     except (BadSignature, Exception):
         return False
+
+
+@asgi_app.middleware("http")
+async def redeem_launch_token(request: Request, call_next):
+    """Convert an `?sg_launch=<token>` URL into a host-only session cookie.
+
+    The admin app at `admin-…<parent>` cannot share its session cookie with
+    this per-notebook host at `nb-…<parent>` — browsers won't honor
+    `Domain=<bare-tld-ish>` like `localhost`. So `/launch` redirects here
+    with the signed session value as a one-shot query param; we set our own
+    host-only cookie and bounce the browser to the clean URL.
+    """
+    token = request.query_params.get(LAUNCH_QUERY_PARAM)
+    if not token or not _cookie_is_valid(token):
+        return await call_next(request)
+    remaining = {
+        k: v for k, v in request.query_params.multi_items() if k != LAUNCH_QUERY_PARAM
+    }
+    clean = request.url.path + (f"?{urlencode(remaining)}" if remaining else "")
+    response = RedirectResponse(clean, status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        secure=False,
+        max_age=SESSION_MAX_AGE,
+        samesite="lax",
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------

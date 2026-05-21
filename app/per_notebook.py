@@ -147,6 +147,7 @@ def per_notebook_env(
     fork_owner: str,
     github_token: str,
     session_secret: str,
+    admin_url: str,
 ) -> flyte.app.AppEnvironment:
     """Build a per-notebook AppEnvironment for one (slug, mode) launch.
 
@@ -158,7 +159,9 @@ def per_notebook_env(
     `fork_owner` + `github_token` let the launch script clone and the
     proxy's `/__sg__/workspace/sync` route commit + push. `session_secret`
     keys the proxy's cookie validation so authenticated browser sessions
-    are accepted while drive-by requests get 401s.
+    are accepted while drive-by requests get 401s. `admin_url` is the
+    admin app's public base URL; the proxy's `/__sg__/dashboard` route
+    302s here so notebooks can link back without knowing the URL.
     """
     return flyte.app.AppEnvironment(
         name=f"nb-{slug}-{mode}",
@@ -178,5 +181,6 @@ def per_notebook_env(
             "FORK_OWNER": fork_owner,
             "GITHUB_TOKEN": github_token,
             "SESSION_SECRET": session_secret,
+            "STARGAZER_ADMIN_URL": admin_url,
         },
     )

@@ -1,4 +1,12 @@
 <div class="dashboard">
-    <div class="user-info">Signed in as <strong>$github_username</strong></div>
+    <details class="user-menu">
+        <summary aria-label="User menu">
+            <img src="https://github.com/$github_username.png?size=80" alt="">
+        </summary>
+        <div class="menu">
+            <div class="menu-user">Signed in as <strong>@$github_username</strong></div>
+            <a class="menu-item" href="/auth/logout">Sign out</a>
+        </div>
+    </details>
     $body
 </div>

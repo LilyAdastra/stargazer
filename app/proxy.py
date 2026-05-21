@@ -6,8 +6,12 @@ the per-notebook pod's public port (8080), validates the same signed
 session cookie the admin app issues (HMAC-keyed by `SESSION_SECRET`),
 then forwards HTTP + websocket traffic to marimo on `127.0.0.1:8081`.
 
-Two reserved paths the proxy handles itself instead of forwarding:
+Three reserved paths the proxy handles itself instead of forwarding:
 
+- `GET  /__sg__/dashboard` — 302 to the admin app's URL (read from
+  `STARGAZER_ADMIN_URL`). Lets notebooks link back to the dashboard
+  with a stable relative path instead of plumbing the admin URL into
+  each notebook's Python.
 - `GET  /__sg__/workspace/list` — directory listing of the user's
   workspace from the pod-local `/workspace` clone of their fork. Admin
   app queries this on dashboard render so workspace state is read
@@ -99,9 +103,23 @@ async def redeem_launch_token(request: Request, call_next):
 
 
 # ---------------------------------------------------------------------------
-# Workspace endpoints (handled locally, NOT forwarded to marimo).
+# Reserved /__sg__/* endpoints (handled locally, NOT forwarded to marimo).
 # Declared before the catch-all proxy routes so FastAPI matches them first.
 # ---------------------------------------------------------------------------
+
+
+@asgi_app.get("/__sg__/dashboard")
+async def dashboard_redirect() -> Response:
+    """Redirect back to the admin dashboard.
+
+    Admin and per-notebook live on sibling subdomains, so a notebook
+    can't just link to `/`. The admin pod stamps its own URL into the
+    per-notebook's `STARGAZER_ADMIN_URL` env var at launch time; this
+    route just 302s the browser there. No cookie check — the dashboard
+    is the place users go to *re*-authenticate.
+    """
+    target = os.environ.get("STARGAZER_ADMIN_URL") or "/"
+    return RedirectResponse(target, status_code=302)
 
 
 @asgi_app.get("/__sg__/workspace/list")

@@ -36,6 +36,8 @@ class Notebook:
     path_in_image: str
 
 
+# Keep slug/section in sync with `src/stargazer/notebooks/__init__.py::NAV_ORDER`
+# so the per-notebook navigation bar's prev/next buttons resolve correctly.
 NOTEBOOKS: tuple[Notebook, ...] = (
     Notebook(
         slug="preprocessing",

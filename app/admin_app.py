@@ -271,7 +271,6 @@ def _render_tiles(workspace_files: list[str]) -> str:
     <section><h2>Tutorials</h2><div class="grid">{tutorials}</div></section>
     <section><h2>Community</h2><div class="grid">{community}</div></section>
     <section><h2>Workspace</h2><div class="grid">{workspace}</div></section>
-    <div class="logout"><a href="/auth/logout">Sign out</a></div>
     """
 
 
@@ -388,6 +387,12 @@ async def launch(
         notebook_path = nb.path_in_image
 
     project = sanitize_project_id(session.github_username)
+    # Prefer the explicit LANDING_BASE_URL (set in hosted deploys); fall back
+    # to the request's own base_url so local dev (`uvicorn ... --reload`) works
+    # without extra config.
+    admin_url = (
+        os.environ.get("LANDING_BASE_URL") or str(request.base_url)
+    ).rstrip("/")
     env = per_notebook_env(
         slug=slug,
         mode=mode,  # type: ignore[arg-type]
@@ -395,6 +400,7 @@ async def launch(
         fork_owner=session.fork_owner,
         github_token=session.access_token,
         session_secret=_env("SESSION_SECRET"),
+        admin_url=admin_url,
     )
     env.env_vars["FLYTE_PROJECT"] = project
 

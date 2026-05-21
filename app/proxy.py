@@ -6,12 +6,16 @@ the per-notebook pod's public port (8080), validates the same signed
 session cookie the admin app issues (HMAC-keyed by `SESSION_SECRET`),
 then forwards HTTP + websocket traffic to marimo on `127.0.0.1:8081`.
 
-Three reserved paths the proxy handles itself instead of forwarding:
+Four reserved paths the proxy handles itself instead of forwarding:
 
 - `GET  /__sg__/dashboard` — 302 to the admin app's URL (read from
   `STARGAZER_ADMIN_URL`). Lets notebooks link back to the dashboard
   with a stable relative path instead of plumbing the admin URL into
   each notebook's Python.
+- `GET  /__sg__/ready` — unauthenticated readiness probe; returns 200
+  once local marimo answers, 503 while it's still cold-starting. Polled
+  by the admin app's `/launch` handler so the dashboard spinner only
+  resolves once the pod is actually serving.
 - `GET  /__sg__/workspace/list` — directory listing of the user's
   workspace from the pod-local `/workspace` clone of their fork. Admin
   app queries this on dashboard render so workspace state is read
@@ -120,6 +124,28 @@ async def dashboard_redirect() -> Response:
     """
     target = os.environ.get("STARGAZER_ADMIN_URL") or "/"
     return RedirectResponse(target, status_code=302)
+
+
+@asgi_app.get("/__sg__/ready")
+async def ready() -> Response:
+    """Probe local marimo on 127.0.0.1:8081; 200 if reachable, else 503.
+
+    Polled cross-origin from the dashboard JS so the spinner can resolve
+    once the pod is actually serving. Devbox-style URLs (e.g.
+    `…localhost:30081`) only resolve on the developer's machine, so the
+    probe has to come from the browser, not from the admin pod. Hence
+    the `Access-Control-Allow-Origin: *` header — readiness leaks no
+    data so wildcard is fine. Unauthenticated by design.
+    """
+    headers = {"Access-Control-Allow-Origin": "*"}
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(f"http://{MARIMO_HOST}:{MARIMO_HTTP_PORT}/")
+        if resp.status_code < 500:
+            return Response("ready", status_code=200, headers=headers)
+    except Exception:
+        pass
+    return Response("not ready", status_code=503, headers=headers)
 
 
 @asgi_app.get("/__sg__/workspace/list")

@@ -44,7 +44,7 @@ import flyte
 import flyte.app
 import httpx
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from stargazer.config import (
     PROJECT_ROOT,
@@ -133,10 +133,16 @@ app_env = flyte.app.AppEnvironment(
 # ---------------------------------------------------------------------------
 
 
-# `_launched[github_username]` is the set of (slug, mode) the user has
-# spawned at least once. Used to know which per-notebook pod's
-# `/__sg__/workspace/list` to query when rendering the dashboard.
-_launched: dict[str, set[tuple[str, str]]] = defaultdict(set)
+# `_launched[github_username][(slug, mode)]` is the public endpoint URL of
+# every per-notebook pod the user has spawned at least once. Used by:
+#   - `/launch/status` to probe `<endpoint>/__sg__/ready` for the dashboard
+#     spinner (the in-cluster `.svc.cluster.local` DNS pattern was unreliable
+#     across cluster configs; going through the same URL the browser uses
+#     sidesteps the question entirely).
+#   - `/__sg__/workspace/list` queries when rendering the dashboard.
+# In-memory only — admin restarts clear it; users would then re-click Edit/Run
+# to repopulate.
+_launched: dict[str, dict[tuple[str, str], str]] = defaultdict(dict)
 
 
 # ---------------------------------------------------------------------------
@@ -181,21 +187,21 @@ def _get_session(request: Request) -> SessionData | None:
 
 
 async def _list_workspace_from_pods(
-    session_cookie: str, project: str, slug_modes: set[tuple[str, str]]
+    session_cookie: str, endpoints: dict[tuple[str, str], str]
 ) -> list[str] | None:
     """Try each previously-launched per-notebook pod for a workspace listing.
 
     Returns the first successful response's file list, or None if no pod
-    answers within the short per-attempt timeout. Cross-namespace HTTP
-    inside the cluster uses Knative's deterministic DNS:
-    `nb-<slug>-<mode>.<project>.svc.cluster.local`.
+    answers within the short per-attempt timeout. Uses each pod's public
+    endpoint URL (cached at /launch time) so the request follows the same
+    path the browser uses — no dependence on in-cluster DNS.
     """
-    for slug, mode in slug_modes:
-        url = (
-            f"http://nb-{slug}-{mode}.{project}.svc.cluster.local/__sg__/workspace/list"
-        )
+    for endpoint in endpoints.values():
+        url = f"{endpoint.rstrip('/')}/__sg__/workspace/list"
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(
+                timeout=2.0, follow_redirects=True
+            ) as client:
                 resp = await client.get(url, cookies={SESSION_COOKIE: session_cookie})
             if resp.status_code == 200:
                 return resp.json().get("files", [])
@@ -208,9 +214,8 @@ async def _resolve_workspace_files(
     session: SessionData, cookie_value: str
 ) -> list[str]:
     """Return the user's workspace files, preferring a live pod over GitHub."""
-    project = sanitize_project_id(session.github_username)
-    known = _launched.get(session.github_username, set())
-    from_pod = await _list_workspace_from_pods(cookie_value, project, known)
+    known = _launched.get(session.github_username, {})
+    from_pod = await _list_workspace_from_pods(cookie_value, known)
     if from_pod is not None:
         return from_pod
     if not session.access_token or not session.fork_owner:
@@ -236,13 +241,13 @@ def _render_tiles(workspace_files: list[str]) -> str:
         <div class="tile">
           <h3>{title}</h3>
           <p>{description}</p>
-          <form method="post" action="/launch" style="display:inline;">
+          <form method="post" action="/launch" class="launch-form" style="display:inline;">
             <input type="hidden" name="slug" value="{slug}">
             <input type="hidden" name="section" value="{section}">
             <input type="hidden" name="mode" value="edit">
             <button class="btn btn-notebook" type="submit">Edit</button>
           </form>
-          <form method="post" action="/launch" style="display:inline;">
+          <form method="post" action="/launch" class="launch-form" style="display:inline;">
             <input type="hidden" name="slug" value="{slug}">
             <input type="hidden" name="section" value="{section}">
             <input type="hidden" name="mode" value="run">
@@ -407,7 +412,7 @@ async def launch(
     deployment = await flyte.with_servecontext(
         project=project, domain="development"
     ).serve.aio(env)
-    _launched[session.github_username].add((slug, mode))
+    _launched[session.github_username][(slug, mode)] = deployment.endpoint
 
     # Hand off the signed session as a one-shot query param. The admin and the
     # per-notebook live on sibling subdomains; browsers won't share the
@@ -417,6 +422,13 @@ async def launch(
     # cookie, and 302s back to the clean URL.
     launch_token = request.cookies.get(SESSION_COOKIE, "")
     handoff = f"{deployment.endpoint}?sg_launch={launch_token}"
+
+    # AJAX clients get the URL as JSON immediately so the dashboard tile can
+    # start polling `/launch/status` for readiness and swap the spinner for
+    # an "Open" link once the pod responds. Plain form submissions (no JS)
+    # still get the 303 redirect.
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"url": handoff})
     return RedirectResponse(handoff, status_code=303)
 
 

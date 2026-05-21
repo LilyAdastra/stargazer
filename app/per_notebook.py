@@ -55,11 +55,18 @@ _PROXY_MODULE = "sg_proxy"
 _LAUNCH_BIN = "/usr/local/bin"
 
 
-# Stable tag the deployer publishes (`admin_app._build_and_push_notebook_image`)
-# and that running admin pods reference when spawning per-notebook apps. Pinning
-# a fixed tag decouples per-notebook serve calls from whatever content hash the
-# in-pod Python state would otherwise compute for `notebook_app_img_recipe`.
-NOTEBOOK_IMAGE_TAG = "stable"
+# Mutable tag the deployer publishes (`admin_app._build_and_push_notebook_image`)
+# and that running admin pods reference when spawning per-notebook apps. A fixed
+# tag decouples per-notebook serve calls from whatever content hash the in-pod
+# Python state would otherwise compute for `notebook_app_img_recipe`.
+#
+# `:latest` is load-bearing: it flips K8s's default `imagePullPolicy` to `Always`,
+# so per-notebook pods pull on every cold-start and pick up code changes after a
+# `python -m app.admin_app` redeploy. Any other tag defaults to `IfNotPresent`,
+# and nodes that already cached the previous manifest digest skip the pull —
+# meaning new proxy code (e.g. a new `/__sg__/*` route) never reaches the pod.
+# In prod with a remote builder, this drops out: each deploy gets a unique URI.
+NOTEBOOK_IMAGE_TAG = "latest"
 NOTEBOOK_IMAGE_URI = (
     f"{os.environ['STARGAZER_REGISTRY']}/notebook-app:{NOTEBOOK_IMAGE_TAG}"
 )

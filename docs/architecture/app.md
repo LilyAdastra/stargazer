@@ -52,13 +52,24 @@ This is why `notebook_app` is not a factory function — nothing per-user lives 
 
 Forking a user's GitHub account is **opt-in**, not automatic. Login creates the user's Flyte project but writes nothing to GitHub; `SessionData.fork_owner` stays empty (`SessionData.workspace_enabled` is False). Tutorials and Community notebooks run from the image and need no fork.
 
-The Workspace section then renders a disclaimer + an **Enable workspace saving** button. `POST /workspace/enable` forks the upstream repo, records `fork_owner` in the re-signed session cookie, and only from then on does the section list the user's notebooks and do `/launch` permit workspace launches (clone-on-start + push-on-sync against the fork's `workspace` branch). The `public_repo` OAuth scope is still requested at login, but no fork is created until this explicit action.
+The Workspace section then renders a disclaimer + an **Enable workspace saving** button. `POST /workspace/enable` forks the upstream repo, records `fork_owner` in the re-signed session cookie, and only from then on does the section list the user's notebooks and do `/launch` permit workspace launches (clone-on-start + push-on-sync against the fork's `main`). The `public_repo` OAuth scope is still requested at login, but no fork is created until this explicit action.
+
+## Creating Notebooks & Per-Notebook Resources
+
+Once opted in, the Workspace section offers a **New notebook** form (name, blank|template, cpu, memory). The seeds are real shipped notebooks — `notebooks/workspace/blank.py` and `template.py` — not generated source. `POST /workspace/create` slugifies the name, copies the chosen seed, injects the requested resources into its `[tool.stargazer]` header (`with_stargazer_resources`), writes it to the fork's `main` under `notebooks/workspace/`, and returns the slug. The browser then chains into the normal `/launch` (edit) flow for that slug — `/launch` stays the only path that serves a pod. Both seed slugs are reserved create names and filtered out of the dashboard's tile listing.
+
+Resources live **in the notebook**. At `/launch`, the admin fetches a workspace notebook's source from the fork and `app.notebook_meta.parse_notebook_resources` reads `[tool.stargazer]` (cpu/memory) and passes it to `per_notebook_env(resources=…)`. Values are honored **as-authored — no ceiling**; you rightsize per-notebook for the target cluster. Parsing is purely textual — the admin never executes notebook code. Image-baked tutorials/community notebooks carry no such block and keep the env's legacy `("2Gi", "6Gi")` default.
+
+## Working Branch
+
+User notebooks live and persist on the fork's **`main`** — there is no side branch. The launch script clones `main`, the proxy's sync commits and pushes back to `main`, and the dashboard lists from `main`. Conflicts with upstream are avoided not by branch isolation but by **path discipline**: the proxy only ever `git add`s `src/stargazer/notebooks/workspace/`, and users create new-named notebooks rather than editing shipped files, so the fork's `main` and upstream touch disjoint paths. The one shared file, `template.py`, is copied (never edited in place) by the create flow. The fork is also not auto-synced from upstream, and the SDK that notebooks import comes from the per-notebook image (`/stargazer`), not the fork checkout — so a drifting `main` doesn't affect execution.
 
 ## Modules
 
 | Module | Role |
 |--------|------|
-| `app/admin_app.py` | `app_env` + FastAPI routes (`/`, `/auth/login`, `/auth/callback`, `/auth/logout`, `/workspace/enable`, `/launch`, `/stop`, `/health`). `/workspace/enable` is the opt-in that forks the upstream repo and records `fork_owner`; `/launch` serves a per-notebook env (workspace launches require opt-in); `/stop` deactivates it by name (`App.get(...).deactivate()`). Lifespan runs `init()` at startup. |
+| `app/admin_app.py` | `app_env` + FastAPI routes (`/`, `/auth/login`, `/auth/callback`, `/auth/logout`, `/workspace/enable`, `/workspace/create`, `/launch`, `/stop`, `/health`). `/workspace/enable` is the opt-in that forks the upstream repo and records `fork_owner`; `/workspace/create` writes a new notebook (blank or from template) to the fork's `main` and returns its slug; `/launch` serves a per-notebook env (workspace launches require opt-in); `/stop` deactivates it by name (`App.get(...).deactivate()`). Lifespan runs `init()` at startup. |
+| `app/notebook_meta.py` | Static parsing of a notebook's PEP 723 `[tool.stargazer]` resource block (no code execution, honored as-authored — no ceiling); plus the resource-injection helper (`with_stargazer_resources`) used by `/workspace/create`. |
 | `app/notebook_app.py` | `notebook_env` — marimo edit on the bundled scRNA tutorial. |
 | `app/provision.py` | `provision_user()` — creates the Flyte project and serves `notebook_env` into it via `with_servecontext`. |
 | `app/oauth.py` | GitHub OAuth helpers. |

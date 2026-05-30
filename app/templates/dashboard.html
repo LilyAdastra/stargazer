@@ -30,9 +30,29 @@
         <h2>Workspace</h2>
         {% if workspace_enabled %}
         <p class="section-desc">Author your own notebooks from scratch and
-        commit them to your branch. Start from the <strong>Template</strong>
-        below — anything you save lands in <code>notebooks/workspace/</code>
-        on your fork.</p>
+        commit them to your branch. Create one below or start from the
+        <a href="https://github.com/StargazerBio/stargazer/blob/main/src/stargazer/notebooks/workspace/template.py"
+           target="_blank" rel="noopener">template</a> — anything you save
+        lands in <code>notebooks/workspace/</code> on your fork.</p>
+        <form id="create-form" class="create-form">
+            <input name="name" class="create-name" placeholder="New notebook name"
+                   required maxlength="60">
+            <select name="source" title="Start from">
+                <option value="blank">Blank</option>
+                <option value="template">From template</option>
+            </select>
+            <select name="cpu" title="CPUs">
+                <option value="1">1 CPU</option>
+                <option value="2" selected>2 CPU</option>
+                <option value="4">4 CPU</option>
+            </select>
+            <select name="memory" title="Memory">
+                <option value="2Gi">2 GiB</option>
+                <option value="4Gi" selected>4 GiB</option>
+                <option value="6Gi">6 GiB</option>
+            </select>
+            <button type="submit" class="btn btn-notebook">Create &amp; open</button>
+        </form>
         <div class="grid">
             {% for tile in workspace %}{% include "_tile.html" %}{% endfor %}
         </div>
@@ -140,6 +160,32 @@
         }
     }
 
+    // POST /launch with the given FormData and return the per-notebook URL,
+    // throwing with a useful message on any non-JSON / error response.
+    // Shared by the tile Edit/Run buttons and the create-and-open flow.
+    async function requestLaunch(formData) {
+        const resp = await fetch('/launch', {
+            method: 'POST',
+            body: formData,
+            headers: { Accept: 'application/json' },
+        });
+        // Read once as text so we can surface the body even when the server
+        // returned HTML (e.g. an error page, or a 302 fetch silently followed).
+        const rawBody = await resp.text();
+        const ctype = resp.headers.get('content-type') || '';
+        if (!ctype.includes('application/json')) {
+            const snippet = rawBody.slice(0, 200).replace(/\s+/g, ' ');
+            throw new Error('launch HTTP ' + resp.status + ' (non-JSON): ' + snippet);
+        }
+        let payload;
+        try { payload = JSON.parse(rawBody); }
+        catch (_) { throw new Error('launch JSON parse failed: ' + rawBody.slice(0, 200)); }
+        if (!resp.ok) {
+            throw new Error('launch HTTP ' + resp.status + ': ' + (payload.error || rawBody));
+        }
+        return payload.url;
+    }
+
     document.querySelectorAll('form.launch-form').forEach((form) => {
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -149,27 +195,7 @@
             button.disabled = true;
             button.innerHTML = '<span class="spinner-inline"></span>';
             try {
-                const launchResp = await fetch(form.action, {
-                    method: 'POST',
-                    body: new FormData(form),
-                    headers: { Accept: 'application/json' },
-                });
-                // Read once as text so we can surface the body even when
-                // the server returned HTML (e.g. an error page, or a 302
-                // that fetch silently followed to the dashboard).
-                const rawBody = await launchResp.text();
-                const ctype = launchResp.headers.get('content-type') || '';
-                if (!ctype.includes('application/json')) {
-                    const snippet = rawBody.slice(0, 200).replace(/\s+/g, ' ');
-                    throw new Error('launch HTTP ' + launchResp.status + ' (non-JSON): ' + snippet);
-                }
-                let payload;
-                try { payload = JSON.parse(rawBody); }
-                catch (_) { throw new Error('launch JSON parse failed: ' + rawBody.slice(0, 200)); }
-                if (!launchResp.ok) {
-                    throw new Error('launch HTTP ' + launchResp.status + ': ' + (payload.error || rawBody));
-                }
-                const { url } = payload;
+                const url = await requestLaunch(new FormData(form));
                 // Poll for readiness for up to 3 min — covers cold-start
                 // plus uv's sandbox-venv install (~90 packages).
                 const ready = await pollReady(url, Date.now() + 180000);
@@ -184,5 +210,42 @@
             }
         });
     });
+
+    // Create-and-open: POST /workspace/create to write the file, then chain
+    // into the standard /launch (edit) path for the returned slug and
+    // navigate to the new notebook once it's ready.
+    const createForm = document.getElementById('create-form');
+    if (createForm) {
+        createForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const button = createForm.querySelector('button[type="submit"]');
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.innerHTML = '<span class="spinner-inline"></span>';
+            try {
+                const resp = await fetch('/workspace/create', {
+                    method: 'POST',
+                    body: new FormData(createForm),
+                    headers: { Accept: 'application/json' },
+                });
+                const payload = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    throw new Error(payload.error || ('HTTP ' + resp.status));
+                }
+                const fd = new FormData();
+                fd.set('slug', payload.slug);
+                fd.set('section', 'workspace');
+                fd.set('mode', 'edit');
+                const url = await requestLaunch(fd);
+                const ready = await pollReady(url, Date.now() + 180000);
+                if (!ready) throw new Error('timed out waiting for notebook to start');
+                window.location.href = url;
+            } catch (err) {
+                button.disabled = false;
+                button.textContent = originalLabel;
+                alert('Create failed: ' + err.message);
+            }
+        });
+    }
 </script>
 {% endblock %}

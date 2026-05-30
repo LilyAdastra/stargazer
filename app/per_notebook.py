@@ -44,6 +44,8 @@ import flyte.app
 
 from stargazer.config import PROJECT_ROOT, STARGAZER_ENV_VARS
 
+from app.notebook_meta import NotebookResources
+
 
 # Bake the proxy as a TOP-LEVEL module (not under `app/`) because Flyte's
 # loaded_modules code bundle ships an `app/` package into the pod's cwd
@@ -155,6 +157,7 @@ def per_notebook_env(
     github_token: str,
     session_secret: str,
     admin_url: str,
+    resources: NotebookResources | None = None,
 ) -> flyte.app.AppEnvironment:
     """Build a per-notebook AppEnvironment for one (slug, mode) launch.
 
@@ -169,7 +172,17 @@ def per_notebook_env(
     are accepted while drive-by requests get 401s. `admin_url` is the
     admin app's public base URL; the proxy's `/__sg__/dashboard` route
     302s here so notebooks can link back without knowing the URL.
+
+    `resources` is the notebook's declared `[tool.stargazer]` spec, honored
+    as-authored (no ceiling). When None — image-baked tutorials and community
+    notebooks — the env falls back to the legacy `("2Gi", "6Gi")`
+    request/limit, which the memory-heavy scRNA notebook depends on.
     """
+    flyte_resources = (
+        flyte.Resources(cpu=resources.cpu, memory=resources.memory)
+        if resources is not None
+        else flyte.Resources(memory=("2Gi", "6Gi"))
+    )
     return flyte.app.AppEnvironment(
         name=f"nb-{slug}-{mode}",
         description=f"Per-notebook app: {slug} ({mode})",
@@ -181,7 +194,7 @@ def per_notebook_env(
         ],
         port=8080,
         requires_auth=False,
-        resources=flyte.Resources(memory=("2Gi", "6Gi")),
+        resources=flyte_resources,
         env_vars={
             **STARGAZER_ENV_VARS,
             "FLYTE_DOMAIN": "development",

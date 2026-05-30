@@ -19,19 +19,14 @@ IMAGE_WORKDIR = "/stargazer"
 WORKSPACE_NOTEBOOK_DIR = "/workspace/src/stargazer/notebooks/workspace"
 
 
-# The workspace template ships in every fork at
-# `notebooks/workspace/template.py`, so it's always present in the pod's
-# `/workspace` clone. The dashboard surfaces it as a guaranteed Workspace
-# tile — discovered workspace files only appear once the fork's `workspace`
-# branch exists (created on first sync), so without this the section would
-# look empty for brand-new users. Launches like any workspace slug via
-# `/launch` (section=workspace → `{WORKSPACE_NOTEBOOK_DIR}/{slug}.py`).
+# Seed notebooks shipped in every fork at `notebooks/workspace/{slug}.py`.
+# `/workspace/create` copies one of these under the user's chosen name. They
+# are NOT rendered as dashboard tiles (only user-created notebooks are): the
+# template is linked from the Workspace description, and both slugs are
+# reserved create names + filtered out of the tile listing.
 TEMPLATE_SLUG = "template"
-TEMPLATE_TITLE = "Template"
-TEMPLATE_DESCRIPTION = (
-    "Skeleton for ingesting a file, defining an asset, processing it with a "
-    "task, and fanning that out into a workflow."
-)
+BLANK_SLUG = "blank"
+SEED_SLUGS = frozenset({TEMPLATE_SLUG, BLANK_SLUG})
 
 
 @dataclass(frozen=True)

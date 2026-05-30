@@ -21,9 +21,11 @@ Four reserved paths the proxy handles itself instead of forwarding:
   app queries this on dashboard render so workspace state is read
   straight off disk.
 - `POST /__sg__/workspace/sync` — `git add` + `git commit` + `git push`
-  against the user's fork using the `GITHUB_TOKEN`/`FORK_OWNER` baked
-  into env_vars at deploy time. Called by the launch script's SIGTERM
-  hook on idle-down, and exposed to the admin app as a "save" affordance.
+  to the fork's `main` using the `GITHUB_TOKEN`/`FORK_OWNER` baked into
+  env_vars at deploy time. Only the `notebooks/workspace/` dir is staged,
+  so the fork's `main` never collides with upstream's shipped files.
+  Called by the launch script's SIGTERM hook on idle-down, and exposed to
+  the admin app as a "save" affordance.
 
 Self-contained on purpose: the notebook image installs only `fastapi`,
 `uvicorn`, `itsdangerous`, `httpx`, `websockets` at system level and
@@ -198,7 +200,7 @@ async def workspace_sync(request: Request) -> Response:
         return JSONResponse(
             {"error": "git commit failed", "stderr": commit.stderr}, status_code=500
         )
-    push = git("push", "origin", "HEAD:workspace")
+    push = git("push", "origin", "HEAD:main")
     if push.returncode != 0:
         return JSONResponse(
             {"error": "git push failed", "stderr": push.stderr}, status_code=500

@@ -1,0 +1,33 @@
+"""Tests for resource wiring in `per_notebook_env`."""
+
+from app.notebook_meta import NotebookResources
+from app.per_notebook import per_notebook_env
+
+
+def _env(**overrides):
+    """Build a per-notebook env with sensible defaults for the keyword args."""
+    kwargs = dict(
+        slug="demo",
+        mode="edit",
+        notebook_path="/workspace/x.py",
+        fork_owner="octocat",
+        github_token="tok",
+        session_secret="sek",
+        admin_url="http://admin",
+    )
+    kwargs.update(overrides)
+    return per_notebook_env(**kwargs)
+
+
+def test_default_resources_preserve_legacy_request_limit():
+    """With no resources, the env keeps the legacy ('2Gi','6Gi') tuple."""
+    env = _env()
+    assert env.resources.memory == ("2Gi", "6Gi")
+    assert env.resources.cpu is None
+
+
+def test_custom_resources_applied_to_env():
+    """A NotebookResources spec maps onto the env's flyte.Resources."""
+    env = _env(resources=NotebookResources(cpu=2, memory="4Gi"))
+    assert env.resources.cpu == 2
+    assert env.resources.memory == "4Gi"

@@ -8,7 +8,8 @@
 # Three things happen on startup:
 #
 #   1. If the container-local /workspace is empty (no /workspace/.git),
-#      clone the user's stargazer fork into it. Storage is the pod's
+#      clone the user's stargazer fork (default branch, `main`) into it.
+#      User notebooks live and persist on `main`; storage is the pod's
 #      ephemeral filesystem; the fork is the source of truth.
 #   2. Start marimo on 127.0.0.1:8081 in sandbox mode (notebook's PEP 723
 #      header drives the venv).

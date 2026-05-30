@@ -34,6 +34,7 @@ spec: [docs/architecture/app.md](../docs/architecture/app.md)
 
 import atexit
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -56,12 +57,22 @@ from stargazer.config import (
     logger,
 )
 
-from app.github import fork_upstream, list_workspace as gh_list_workspace
+from app.github import (
+    create_workspace_notebook,
+    fork_upstream,
+    get_workspace_notebook,
+    list_workspace as gh_list_workspace,
+)
+from app.notebook_meta import (
+    DEFAULT_RESOURCES,
+    NotebookResources,
+    parse_notebook_resources,
+    resources_from_inputs,
+    with_stargazer_resources,
+)
 from app.init import init
 from app.notebooks import (
-    TEMPLATE_DESCRIPTION,
-    TEMPLATE_SLUG,
-    TEMPLATE_TITLE,
+    SEED_SLUGS,
     WORKSPACE_NOTEBOOK_DIR,
     Notebook,
     by_section,
@@ -261,21 +272,16 @@ def _tile_dict(slug: str, title: str, description: str, section: str) -> dict:
 
 
 def _workspace_tiles(workspace_files: list[str]) -> list[dict]:
-    """Build the Workspace tile list, led by the always-present template.
+    """Build Workspace tiles from the user's own notebooks.
 
-    The template ships in every fork, so it heads the list. Discovered
-    workspace files follow, with `template.py` deduped so a synced copy
-    doesn't render twice.
+    The shipped seed notebooks (`SEED_SLUGS`) are filtered out — they're
+    create sources, not user notebooks. Only user-created notebooks tile.
     """
-    tiles = [
-        _tile_dict(TEMPLATE_SLUG, TEMPLATE_TITLE, TEMPLATE_DESCRIPTION, "workspace")
+    return [
+        _tile_dict(slug, f, "Personal workspace notebook.", "workspace")
+        for f in workspace_files
+        if (slug := f.removesuffix(".py")) not in SEED_SLUGS
     ]
-    for f in workspace_files:
-        slug = f.removesuffix(".py")
-        if slug == TEMPLATE_SLUG:
-            continue
-        tiles.append(_tile_dict(slug, f, "Personal workspace notebook.", "workspace"))
-    return tiles
 
 
 def _dashboard_context(
@@ -405,10 +411,10 @@ async def workspace_enable(request: Request):
     This is the explicit, consent-gated action that creates the user's fork
     and records `fork_owner` in the session. Only after this does the
     Workspace section list notebooks and do launches persist edits back to
-    the fork's `workspace` branch. Idempotent — `fork_upstream` returns the
-    existing fork if one already exists. On failure the session is left
-    untouched (saving stays off) so the user sees the disclaimer and can
-    retry rather than landing in a half-enabled state.
+    the fork's `main`. Idempotent — `fork_upstream` returns the existing
+    fork if one already exists. On failure the session is left untouched
+    (saving stays off) so the user sees the disclaimer and can retry rather
+    than landing in a half-enabled state.
     """
     session = _get_session(request)
     if session is None:
@@ -431,6 +437,80 @@ async def workspace_enable(request: Request):
         samesite="lax",
     )
     return response
+
+
+_NOTEBOOK_NAME_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _notebook_slug(name: str) -> str | None:
+    """Sanitize a user-supplied notebook name into a filesystem-safe slug.
+
+    Lowercases, collapses runs of non-alphanumerics to single hyphens, and
+    trims leading/trailing hyphens. Returns None when the result is empty or
+    collides with a reserved seed slug (`SEED_SLUGS`).
+    """
+    slug = _NOTEBOOK_NAME_RE.sub("-", name.strip().lower()).strip("-")
+    if not slug or slug in SEED_SLUGS:
+        return None
+    return slug
+
+
+@asgi_app.post("/workspace/create")
+async def workspace_create(
+    request: Request,
+    name: str = Form(...),
+    source: str = Form("blank"),
+    cpu: str = Form(...),
+    memory: str = Form(...),
+):
+    """Create a new workspace notebook (blank or from template) on the fork.
+
+    Writes `<slug>.py` to the fork's `main` (under `notebooks/workspace/`)
+    with the chosen resources baked into its `[tool.stargazer]` header, then
+    returns the slug. The dashboard JS chains into the existing `/launch`
+    flow (edit mode) to open it, so `/launch` stays the only serve path.
+    """
+    session = _get_session(request)
+    if session is None:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    if not session.workspace_enabled:
+        return JSONResponse(
+            {"error": "enable workspace saving first"}, status_code=403
+        )
+    if source not in ("blank", "template"):
+        return JSONResponse({"error": f"invalid source: {source}"}, status_code=400)
+
+    slug = _notebook_slug(name)
+    if slug is None:
+        return JSONResponse(
+            {"error": f"invalid or reserved notebook name: {name!r}"}, status_code=400
+        )
+
+    filename = f"{slug}.py"
+    resources = resources_from_inputs(cpu, memory)
+    owner, token = session.fork_owner, session.access_token
+
+    try:
+        if await get_workspace_notebook(owner, token, filename) is not None:
+            return JSONResponse(
+                {"error": f"notebook already exists: {filename}"}, status_code=409
+            )
+
+        # Both sources are shipped seed notebooks (`{source}.py`); copy the
+        # chosen one and inject the requested resources into its header.
+        seed_src = await get_workspace_notebook(owner, token, f"{source}.py")
+        if seed_src is None:
+            return JSONResponse(
+                {"error": f"{source} seed not found in fork"}, status_code=502
+            )
+        content = with_stargazer_resources(seed_src, resources)
+
+        await create_workspace_notebook(owner, token, filename, content)
+    except Exception as exc:
+        logger.error(f"Notebook create failed for {filename!r}: {exc}")
+        return JSONResponse({"error": f"create failed: {exc}"}, status_code=502)
+
+    return JSONResponse({"slug": slug})
 
 
 @asgi_app.post("/launch")
@@ -461,8 +541,22 @@ async def launch(
     if section == "workspace" and not session.workspace_enabled:
         return _reject("enable workspace saving first", 403)
 
+    # Workspace notebooks declare resources in their `[tool.stargazer]`
+    # header; fetch the source from the fork and parse it before serving.
+    # Image-baked tutorials/community keep the env's legacy defaults
+    # (`resources=None`). A missing/unfetchable source falls back to the
+    # parser's defaults rather than failing the launch.
+    resources: NotebookResources | None = None
     if section == "workspace":
         notebook_path = f"{WORKSPACE_NOTEBOOK_DIR}/{slug}.py"
+        try:
+            source = await get_workspace_notebook(
+                session.fork_owner, session.access_token, f"{slug}.py"
+            )
+        except Exception as exc:
+            logger.warning(f"Resource fetch failed for workspace {slug!r}: {exc}")
+            source = None
+        resources = parse_notebook_resources(source) if source else DEFAULT_RESOURCES
     else:
         nb: Notebook | None = by_slug(slug)
         if nb is None or nb.section != section:
@@ -484,6 +578,7 @@ async def launch(
         github_token=session.access_token,
         session_secret=_env("SESSION_SECRET"),
         admin_url=admin_url,
+        resources=resources,
     )
     env.env_vars["FLYTE_PROJECT"] = project
 

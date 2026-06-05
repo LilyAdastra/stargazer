@@ -45,16 +45,16 @@
                 <option value="blank">Blank</option>
                 <option value="template">From template</option>
             </select>
-            <select name="cpu" title="CPUs">
-                <option value="1">1 CPU</option>
-                <option value="2" selected>2 CPU</option>
-                <option value="4">4 CPU</option>
-            </select>
-            <select name="memory" title="Memory">
-                <option value="2Gi">2 GiB</option>
-                <option value="4Gi" selected>4 GiB</option>
-                <option value="6Gi">6 GiB</option>
-            </select>
+            <label class="create-field" title="CPUs">
+                <input type="number" name="cpu" value="2" min="1" step="1"
+                       required class="create-num" aria-label="CPUs">
+                <span class="create-unit">CPU</span>
+            </label>
+            <label class="create-field" title="Memory in GiB">
+                <input type="number" name="memory" value="4" min="1" step="1"
+                       required class="create-num" aria-label="Memory in GiB">
+                <span class="create-unit">GiB</span>
+            </label>
             <button type="submit" class="btn btn-notebook">Create</button>
         </form>
         <div class="grid" id="workspace-grid">

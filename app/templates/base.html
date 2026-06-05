@@ -4,7 +4,34 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }} — Stargazer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --surface-2: #1c2230;
+            --border: #2a313c;
+            --border-strong: #3b4654;
+            --text: #c9d1d9;
+            --text-dim: #8b949e;
+            --heading: #f0f6fc;
+            /* Palette drawn from the 8-bit stargazer lily: violet petals +
+               outline as the brand/primary, chartreuse-sage stamen as the
+               positive ready/run signal. Both ride the dark canvas as soft
+               tints, never saturated fills, so the grid stays calm. */
+            --accent: #b9a0ec;                       /* violet — primary/brand */
+            --accent-line: rgba(167, 139, 250, 0.42);
+            --accent-soft: rgba(167, 139, 250, 0.13);
+            --accent-softer: rgba(167, 139, 250, 0.24);
+            --green: #9cd47f;                         /* sage-lime — ready/run */
+            --green-line: rgba(134, 199, 108, 0.42);
+            --green-soft: rgba(134, 199, 108, 0.13);
+            --green-softer: rgba(134, 199, 108, 0.24);
+            --danger: #e5534b;
+            --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -47,15 +74,56 @@
             gap: 0.75rem;
         }
         .tile {
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 8px;
-            padding: 1rem;
+            position: relative;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.05rem 1.1rem 0.95rem;
             text-align: left;
+            display: flex;
+            flex-direction: column;
+            gap: 0.55rem;
+            overflow: hidden;
+            transition: border-color 0.18s ease, transform 0.18s ease,
+                        box-shadow 0.18s ease;
         }
-        .tile p { font-size: 0.85rem; color: #8b949e; margin-bottom: 0.75rem; min-height: 2.5em; }
+        /* Accent rule that animates in on hover — the only color the resting
+           tile shows, so the grid reads as calm monochrome until you reach. */
+        .tile::before {
+            content: "";
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            width: 2px;
+            background: var(--accent);
+            transform: scaleY(0);
+            transform-origin: top;
+            transition: transform 0.22s ease;
+        }
+        .tile:hover {
+            border-color: var(--border-strong);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 26px rgba(0, 0, 0, 0.38);
+        }
+        .tile:hover::before { transform: scaleY(1); }
+        .tile-file {
+            font-family: var(--mono);
+            font-size: 0.66rem;
+            font-weight: 400;
+            letter-spacing: 0.06em;
+            color: var(--text-dim);
+            opacity: 0.75;
+        }
+        .tile h3 {
+            font-family: var(--mono);
+            font-weight: 600;
+            font-size: 0.95rem;
+            letter-spacing: -0.01em;
+            color: var(--heading);
+            margin: 0;
+        }
+        .tile p { font-size: 0.83rem; color: var(--text-dim); margin: 0; min-height: 2.4em; line-height: 1.45; }
         .section-desc { font-size: 0.85rem; color: #8b949e; margin-bottom: 1rem; max-width: 640px; }
-        .section-desc a { color: #58a6ff; text-decoration: none; }
+        .section-desc a { color: var(--accent); text-decoration: none; }
         .section-desc a:hover { text-decoration: underline; }
         .notice {
             background: #0d1117;
@@ -88,33 +156,76 @@
             font-family: inherit;
         }
         .create-form .create-name { min-width: 200px; }
+        .create-form .create-field { display: inline-flex; align-items: center; gap: 0.35rem; }
+        .create-form .create-num { width: 4rem; }
+        .create-form .create-unit { font-size: 0.85rem; color: #8b949e; }
         .create-form input:focus, .create-form select:focus {
             outline: none;
-            border-color: #58a6ff;
+            border-color: var(--accent);
         }
+        /* Three-tier button system, one accent total:
+           · primary (Edit / Open) — the accent, tinted not saturated
+           · neutral (Run / Save)  — ghost grays, the resting default
+           · danger  (Stop/Delete) — neutral until hover, red only on intent
+           This keeps a tile to a single color at rest instead of six. */
         .btn {
-            display: inline-block;
-            padding: 0.4rem 0.9rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.38rem 0.8rem;
             border-radius: 6px;
             text-decoration: none;
-            font-weight: 600;
-            font-size: 0.85rem;
-            border: none;
+            font-family: var(--mono);
+            font-weight: 500;
+            font-size: 0.78rem;
+            letter-spacing: 0.01em;
+            border: 1px solid transparent;
             cursor: pointer;
-            transition: opacity 0.15s;
-            margin-right: 0.3rem;
+            transition: background 0.15s ease, border-color 0.15s ease,
+                        color 0.15s ease;
         }
-        .btn:hover { opacity: 0.85; }
-        .btn-github { background: #238636; color: #fff; }
-        .btn-notebook { background: #1f6feb; color: #fff; }
-        .btn-stop { background: #da3633; color: #fff; }
-        .btn-save { background: #8957e5; color: #fff; }
-        .btn-muted { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
-        .btn-delete {
-            background: transparent; color: #f85149;
-            border: 1px solid #f85149; margin-top: 0.6rem; align-self: flex-start;
+        /* Primary / brand — violet (lily petals): Edit, Create. */
+        .btn-notebook {
+            background: var(--accent-soft);
+            color: var(--accent);
+            border-color: var(--accent-line);
         }
-        .btn-delete:hover { background: #da3633; color: #fff; opacity: 1; }
+        .btn-notebook:hover {
+            background: var(--accent-softer);
+            border-color: var(--accent);
+        }
+        /* Positive — green (lily stamen): Run, and the launched "Open". */
+        .btn-github, .btn-ready {
+            background: var(--green-soft);
+            color: var(--green);
+            border-color: var(--green-line);
+        }
+        .btn-github:hover, .btn-ready:hover {
+            background: var(--green-softer);
+            border-color: var(--green);
+        }
+        /* Neutral — Save and any muted secondary. */
+        .btn-save, .btn-muted {
+            background: transparent;
+            color: var(--text-dim);
+            border-color: var(--border);
+        }
+        .btn-save:hover, .btn-muted:hover {
+            background: var(--surface-2);
+            border-color: var(--border-strong);
+            color: var(--text);
+        }
+        .btn-stop, .btn-delete {
+            background: transparent;
+            color: var(--text-dim);
+            border-color: var(--border);
+        }
+        .btn-stop:hover, .btn-delete:hover {
+            background: rgba(229, 83, 75, 0.09);
+            border-color: rgba(229, 83, 75, 0.5);
+            color: var(--danger);
+        }
+        .btn-delete { align-self: flex-start; }
         .cleanup-fab {
             position: absolute;
             bottom: 1rem;
@@ -154,10 +265,15 @@
         }
         .cleanup-fab:hover[data-tooltip]::after { opacity: 1; }
         .actions { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
-        .tile-actions { display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
-        .launch-row { display: flex; align-items: center; gap: 0.4rem; }
+        .tile-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+            align-items: center;
+            margin-top: 0.15rem;
+        }
+        .launch-row { display: inline-flex; align-items: center; gap: 0.4rem; }
         .launch-row form { margin: 0; display: inline-flex; }
-        .launch-row .btn { margin-right: 0; }
         .user-menu {
             position: absolute;
             top: 1rem;
@@ -174,7 +290,7 @@
             display: block;
         }
         .user-menu summary::-webkit-details-marker { display: none; }
-        .user-menu summary:hover { border-color: #58a6ff; }
+        .user-menu summary:hover { border-color: var(--accent); }
         .user-menu summary img {
             width: 100%;
             height: 100%;
@@ -212,7 +328,7 @@
             display: inline-block;
             width: 24px; height: 24px;
             border: 3px solid #30363d;
-            border-top-color: #58a6ff;
+            border-top-color: var(--accent);
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
             margin-bottom: 1rem;
@@ -226,12 +342,8 @@
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
         }
-        .btn-ready {
-            background: #2ea043;
-            color: #fff;
-        }
-        .btn-ready::before { content: "✓ "; }
-        .btn[disabled] { opacity: 0.7; cursor: wait; }
+        .btn-ready::before { content: "✓"; font-weight: 600; }
+        .btn[disabled] { opacity: 0.6; cursor: wait; }
         @keyframes spin { to { transform: rotate(360deg); } }
         {% block extra_css %}{% endblock %}
     </style>

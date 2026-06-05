@@ -252,6 +252,81 @@ def test_workspace_enable_failure_leaves_saving_off(secret_env, client, monkeypa
 
 
 # ---------------------------------------------------------------------------
+# /auth/callback — restore Workspace saving for returning users
+# ---------------------------------------------------------------------------
+
+
+def _patch_oauth(monkeypatch):
+    """Stub the OAuth handshake so /auth/callback reaches the fork lookup."""
+
+    async def fake_exchange(**_kw):
+        return "gho_token"
+
+    async def fake_user(_token):
+        return {"login": "octocat", "id": 123}
+
+    async def fake_provision(github_username):
+        return None
+
+    monkeypatch.setattr("app.admin_app.exchange_code", fake_exchange)
+    monkeypatch.setattr("app.admin_app.get_github_user", fake_user)
+    monkeypatch.setattr("app.admin_app.provision_user", fake_provision)
+
+
+def _callback(client):
+    """Drive /auth/callback with a matching oauth_state cookie."""
+    client.cookies.set("oauth_state", "xyz")
+    return client.get("/auth/callback?code=abc&state=xyz", follow_redirects=False)
+
+
+def test_callback_restores_saving_for_returning_fork(secret_env, client, monkeypatch):
+    """A returning user whose fork still exists gets Workspace saving back."""
+    _patch_oauth(monkeypatch)
+
+    async def fake_find(_token, _username):
+        return {"full_name": "octocat/stargazer"}
+
+    monkeypatch.setattr("app.admin_app.find_existing_fork", fake_find)
+
+    resp = _callback(client)
+    session = read_session_cookie(resp.cookies.get(SESSION_COOKIE), SECRET)
+    assert session.fork_full_name == "octocat/stargazer"
+    assert session.workspace_enabled is True
+
+
+def test_callback_saving_off_when_no_fork(secret_env, client, monkeypatch):
+    """A first-time user (no fork yet) starts with saving off."""
+    _patch_oauth(monkeypatch)
+
+    async def fake_find(_token, _username):
+        return None
+
+    monkeypatch.setattr("app.admin_app.find_existing_fork", fake_find)
+
+    resp = _callback(client)
+    session = read_session_cookie(resp.cookies.get(SESSION_COOKIE), SECRET)
+    assert session.fork_full_name == ""
+    assert session.workspace_enabled is False
+
+
+def test_callback_fork_lookup_failure_does_not_block_login(
+    secret_env, client, monkeypatch
+):
+    """A failing fork lookup must not break login — saving just stays off."""
+    _patch_oauth(monkeypatch)
+
+    async def boom(_token, _username):
+        raise RuntimeError("github down")
+
+    monkeypatch.setattr("app.admin_app.find_existing_fork", boom)
+
+    resp = _callback(client)
+    assert resp.status_code == 302
+    session = read_session_cookie(resp.cookies.get(SESSION_COOKIE), SECRET)
+    assert session.workspace_enabled is False
+
+
+# ---------------------------------------------------------------------------
 # /stop
 # ---------------------------------------------------------------------------
 

@@ -63,6 +63,22 @@ def _coerce_cpu(value: object) -> int:
         return DEFAULT_RESOURCES.cpu
 
 
+def _coerce_memory(value: object) -> str:
+    """Coerce a memory input to a Kubernetes quantity string.
+
+    GiB is the fixed unit: a bare integer (the create form's number input, or
+    `memory = 8` authored in a header) becomes `"<n>Gi"`. An already-suffixed
+    quantity (`"4Gi"`, `"512Mi"`) passes through unchanged; empty/None falls
+    back to `DEFAULT_RESOURCES.memory`.
+    """
+    if value is None:
+        return DEFAULT_RESOURCES.memory
+    text = str(value).strip()
+    if not text:
+        return DEFAULT_RESOURCES.memory
+    return f"{text}Gi" if text.isdigit() else text
+
+
 def _extract_stargazer_table(source: str) -> dict:
     """Return the `[tool.stargazer]` table from the PEP 723 header, or {}.
 
@@ -88,13 +104,18 @@ def parse_notebook_resources(source: str) -> NotebookResources:
     """Parse `[tool.stargazer]` resources from notebook source.
 
     Reads `cpu` and `memory` from the PEP 723 header's `[tool.stargazer]`
-    table verbatim (no ceiling — you rightsize per-notebook), filling any
-    missing field from `DEFAULT_RESOURCES`. Always returns a value — never
-    raises.
+    table (no ceiling — you rightsize per-notebook), filling any missing field
+    from `DEFAULT_RESOURCES`. `memory` is normalized via `_coerce_memory`, so a
+    bare integer is read as GiB and a suffixed quantity passes through. Always
+    returns a value — never raises.
     """
     table = _extract_stargazer_table(source)
     cpu = _coerce_cpu(table["cpu"]) if "cpu" in table else DEFAULT_RESOURCES.cpu
-    memory = str(table["memory"]) if "memory" in table else DEFAULT_RESOURCES.memory
+    memory = (
+        _coerce_memory(table["memory"])
+        if "memory" in table
+        else DEFAULT_RESOURCES.memory
+    )
     return NotebookResources(cpu=cpu, memory=memory)
 
 
@@ -102,12 +123,13 @@ def resources_from_inputs(cpu: object, memory: object) -> NotebookResources:
     """Build resources from separate cpu/memory inputs (e.g. a create form).
 
     Values are honored as-authored — no ceiling. `cpu` is coerced to an int
-    (falling back to the default if it isn't one); `memory` is the given
-    quantity string, or the default when empty.
+    (falling back to the default if it isn't one). `memory` is a GiB count: a
+    bare integer becomes `"<n>Gi"`, an already-suffixed quantity passes
+    through, and empty falls back to the default (see `_coerce_memory`).
     """
     return NotebookResources(
         cpu=_coerce_cpu(cpu),
-        memory=str(memory) if memory else DEFAULT_RESOURCES.memory,
+        memory=_coerce_memory(memory),
     )
 
 

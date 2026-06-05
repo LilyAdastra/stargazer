@@ -61,6 +61,7 @@ from stargazer.config import (
 from app.github import (
     create_workspace_notebook,
     delete_workspace_notebook,
+    find_existing_fork,
     fork_upstream,
     get_workspace_notebook,
     is_genuine_fork,
@@ -294,6 +295,16 @@ def _tile_dict(slug: str, title: str, description: str, section: str) -> dict:
     }
 
 
+def _display_name(filename: str) -> str:
+    """Human-friendly tile title for a workspace notebook file.
+
+    Drops the `.py` extension and capitalizes the first letter, so
+    `my-notebook.py` tiles as `My-notebook`.
+    """
+    stem = filename.removesuffix(".py")
+    return stem[:1].upper() + stem[1:]
+
+
 def _workspace_tiles(workspace_files: list[str]) -> list[dict]:
     """Build Workspace tiles from the user's own notebooks.
 
@@ -301,7 +312,7 @@ def _workspace_tiles(workspace_files: list[str]) -> list[dict]:
     create sources, not user notebooks. Only user-created notebooks tile.
     """
     return [
-        _tile_dict(slug, f, "Personal workspace notebook.", "workspace")
+        _tile_dict(slug, _display_name(f), "Personal workspace notebook.", "workspace")
         for f in workspace_files
         if (slug := f.removesuffix(".py")) not in SEED_SLUGS
     ]
@@ -404,15 +415,27 @@ async def auth_callback(request: Request, code: str, state: str):
     except Exception as exc:
         logger.error(f"Provisioning failed for {username!r}: {exc}")
 
-    # GitHub forking is opt-in: no fork is created here. The user enables
-    # Workspace saving explicitly via POST /workspace/enable, which forks
-    # the upstream repo and records `fork_owner`. Until then they run
-    # Tutorials/Community notebooks (ephemeral, image-baked) with no write
-    # to their GitHub account. `fork_owner` stays empty == saving off.
+    # GitHub forking is opt-in: no fork is *created* here. But enabling
+    # Workspace saving forks the upstream repo, and that fork persists on
+    # GitHub across sessions while the session cookie is minted fresh each
+    # login. So detect an already-existing genuine fork and restore
+    # `fork_full_name` — otherwise a returning user who enabled saving in a
+    # past session would find it silently off. Users who never enabled have no
+    # fork, so this stays None == saving off, and they run Tutorials/Community
+    # notebooks (ephemeral, image-baked) with no write to their GitHub account.
+    fork_full_name = ""
+    try:
+        existing_fork = await find_existing_fork(access_token, username)
+        if existing_fork is not None:
+            fork_full_name = existing_fork["full_name"]
+    except Exception as exc:
+        logger.warning(f"Fork lookup failed for {username!r}: {exc}")
+
     session = SessionData(
         github_username=username,
         github_id=github_user["id"],
         access_token=access_token,
+        fork_full_name=fork_full_name,
     )
     cookie = create_session_cookie(session, _env("SESSION_SECRET"))
     response = RedirectResponse("/", status_code=302)
@@ -560,7 +583,9 @@ async def workspace_create(
     # Workspace grid — from there it behaves like any other tile (Edit/Run,
     # then the standard launch + status flow). Create stays a pure "add a
     # notebook" action: no launching, no navigation.
-    tile = _tile_dict(slug, filename, "Personal workspace notebook.", "workspace")
+    tile = _tile_dict(
+        slug, _display_name(filename), "Personal workspace notebook.", "workspace"
+    )
     tile_html = templates.env.get_template("_tile.html").render(tile=tile)
     return JSONResponse({"slug": slug, "tile_html": tile_html})
 

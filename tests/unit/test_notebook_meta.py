@@ -108,6 +108,18 @@ def test_resources_from_inputs_empty_memory_uses_default():
     assert resources_from_inputs(2, "").memory == DEFAULT_RESOURCES.memory
 
 
+def test_resources_from_inputs_bare_int_memory_is_gib():
+    """The create form's GiB number input (a bare int) becomes a Gi quantity."""
+    assert resources_from_inputs("4", "8") == NotebookResources(cpu=4, memory="8Gi")
+
+
+def test_parse_bare_int_memory_read_as_gib():
+    """A header authoring `memory = 16` (bare int) is read as 16 GiB."""
+    assert parse_notebook_resources(
+        _nb("[tool.stargazer]\ncpu = 2\nmemory = 16")
+    ) == NotebookResources(cpu=2, memory="16Gi")
+
+
 # ---------------------------------------------------------------------------
 # with_stargazer_resources — inject/replace the block in existing source
 # ---------------------------------------------------------------------------

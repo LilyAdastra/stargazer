@@ -1,4 +1,5 @@
 <div class="tile">
+    <span class="tile-file">{{ tile.slug }}.py</span>
     <h3>{{ tile.title }}</h3>
     <p>{{ tile.description }}</p>
     <div class="tile-actions">
@@ -18,9 +19,9 @@
                 <button class="btn btn-github" type="submit">Run</button>
             </form>
         </div>
+        {% if tile.section == 'workspace' %}
+        <button type="button" class="btn btn-delete" data-delete-slug="{{ tile.slug }}"
+                title="Delete this notebook from your fork">Delete</button>
+        {% endif %}
     </div>
-    {% if tile.section == 'workspace' %}
-    <button type="button" class="btn btn-delete" data-delete-slug="{{ tile.slug }}"
-            title="Delete this notebook from your fork">Delete</button>
-    {% endif %}
 </div>

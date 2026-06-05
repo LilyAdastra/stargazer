@@ -90,6 +90,30 @@ async def fork_upstream(access_token: str) -> dict:
         return await resp.json()
 
 
+async def find_existing_fork(access_token: str, username: str) -> dict | None:
+    """Return the user's existing fork of the upstream repo, or None.
+
+    Detection-only — no fork is created (that stays the opt-in
+    `/workspace/enable` action). Lets a returning user who enabled Workspace
+    saving in a past session have it restored at login: the fork persists on
+    GitHub, but the session cookie is minted fresh each login. Looks up
+    `{username}/{upstream_name}` and confirms it is a genuine fork whose
+    `parent` is our upstream, so an unrelated repo that merely shares the name
+    is ignored. Any non-200 / network error yields None (saving stays off).
+    """
+    _, name = upstream_repo()
+    url = f"{GITHUB_API_BASE}/repos/{username}/{name}"
+    async with aiohttp.ClientSession() as session:
+        resp = await session.get(url, headers=_auth_headers(access_token))
+        if resp.status != 200:
+            return None
+        repo = await resp.json()
+    parent = ((repo.get("parent") or {}).get("full_name") or "").lower()
+    if is_genuine_fork(repo) and parent == upstream_full_name().lower():
+        return repo
+    return None
+
+
 async def list_workspace(fork_full_name: str, access_token: str) -> list[str]:
     """List `.py` files under `notebooks/workspace/` in the user's fork.
 

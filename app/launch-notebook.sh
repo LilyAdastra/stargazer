@@ -17,9 +17,10 @@
 #      public port). The proxy also serves /__sg__/workspace/list and
 #      /__sg__/workspace/sync straight off the local /workspace directory.
 #
-# A SIGTERM trap calls the local /__sg__/workspace/sync route so any
-# pending workspace edits get committed and pushed before Knative idles
-# the pod.
+# Pending workspace edits are committed and pushed before Knative idles the
+# pod by the proxy's FastAPI shutdown hook (uvicorn runs as PID 1 via `exec`
+# below, so it receives the Knative SIGTERM). A shell `trap` here would not
+# work — `exec` replaces this script, discarding its traps.
 set -euo pipefail
 
 MODE="$1"
@@ -42,17 +43,7 @@ if [ ! -d "${WORKSPACE_DIR}/.git" ]; then
   fi
 fi
 
-flush_workspace() {
-  # Best-effort; never block shutdown.
-  curl -fsS -X POST --max-time 10 \
-    -H "X-Sg-Reason: notebook-shutdown" \
-    http://127.0.0.1:8080/__sg__/workspace/sync || true
-}
-
-trap 'flush_workspace; kill -TERM "$MARIMO_PID" 2>/dev/null || true; exit 0' TERM INT
-
 marimo "${MODE}" --sandbox "${NOTEBOOK_PATH}" \
   --port 8081 --host 127.0.0.1 --headless --no-token &
-MARIMO_PID=$!
 
 exec uvicorn sg_proxy:asgi_app --host 0.0.0.0 --port 8080

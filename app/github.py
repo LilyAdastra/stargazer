@@ -1,9 +1,12 @@
 """
 ### GitHub repo operations beyond OAuth.
 
-Currently scoped to forking upstream `stargazer` into the authenticated
-user's account. Idempotent — calling `fork_upstream` when a fork already
-exists returns the existing one rather than erroring.
+Helpers for the per-user fork that backs the Workspace section: forking the
+upstream `stargazer` repo into the authenticated user's account, and listing,
+reading, creating, and deleting notebook files under `notebooks/workspace/`
+on the fork's `main`. Fork and delete are idempotent. Every write is guarded
+against ever targeting the upstream source (`is_genuine_fork`, plus an
+upstream-name check before create/delete).
 
 spec: [docs/architecture/app.md](../docs/architecture/app.md)
 """
@@ -217,3 +220,48 @@ async def create_workspace_notebook(
             )
         await _ensure_ok(resp, "write notebook")
         return await resp.json()
+
+
+async def delete_workspace_notebook(
+    fork_full_name: str,
+    access_token: str,
+    filename: str,
+    message: str | None = None,
+) -> bool:
+    """Delete a notebook file from the fork's `WORKSPACE_BRANCH`. Idempotent.
+
+    `fork_full_name` is the verified `owner/repo` of the fork. The Contents API
+    requires the file's current blob `sha`, so this fetches it first; if the
+    file is already absent, returns False without erroring. As with create, it
+    refuses to touch the upstream source. Returns True if a file was deleted.
+    """
+    if fork_full_name.lower() == upstream_full_name().lower():
+        raise RuntimeError(
+            f"refusing to write to the upstream source repo {fork_full_name!r}"
+        )
+    path = f"{WORKSPACE_CONTENTS_PATH}/{filename}"
+    url = f"{GITHUB_API_BASE}/repos/{fork_full_name}/contents/{path}"
+    async with aiohttp.ClientSession() as session:
+        head = await session.get(
+            url, headers=_auth_headers(access_token), params={"ref": WORKSPACE_BRANCH}
+        )
+        if head.status == 404:
+            return False
+        await _ensure_ok(head, "delete notebook (lookup)")
+        sha = (await head.json())["sha"]
+
+        payload = {
+            "message": message or f"workspace: delete {filename}",
+            "sha": sha,
+            "branch": WORKSPACE_BRANCH,
+        }
+        resp = await session.delete(
+            url, headers=_auth_headers(access_token), json=payload, allow_redirects=False
+        )
+        if 300 <= resp.status < 400:
+            raise RuntimeError(
+                f"delete notebook: {fork_full_name!r} redirected "
+                f"(HTTP {resp.status}) — not a writable fork path"
+            )
+        await _ensure_ok(resp, "delete notebook")
+        return True

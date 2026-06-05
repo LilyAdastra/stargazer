@@ -19,4 +19,8 @@
             </form>
         </div>
     </div>
+    {% if tile.section == 'workspace' %}
+    <button type="button" class="btn btn-delete" data-delete-slug="{{ tile.slug }}"
+            title="Delete this notebook from your fork">Delete</button>
+    {% endif %}
 </div>

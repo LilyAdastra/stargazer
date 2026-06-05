@@ -12,6 +12,10 @@
         </div>
     </details>
 
+    <button id="cleanup-btn" class="cleanup-fab" type="button"
+            aria-label="Clean up stopped notebooks"
+            data-tooltip="Clean up stopped notebooks">🧹</button>
+
     <section>
         <h2>Tutorials</h2>
         <div class="grid">
@@ -100,9 +104,8 @@
     // Intercept tile Edit/Run submits: POST /launch (returns the URL
     // immediately), then poll the per-notebook's /__sg__/ready directly
     // cross-origin until 200, then swap the spinner for an "Open" link.
-    // Polling from the browser (rather than admin → pod) sidesteps the
-    // devbox networking trap where the per-notebook URL only resolves on
-    // the developer's machine, not from inside the admin pod.
+    // Polling from the browser (rather than admin → pod) checks readiness
+    // from the same vantage point the user will open the notebook from.
     async function pollReady(notebookUrl, deadlineMs) {
         // Build the absolute /__sg__/ready URL by replacing the path on the
         // notebookUrl (which has a ?sg_launch=… token). Strip the query
@@ -144,6 +147,42 @@
 
         row.appendChild(open);
         row.appendChild(stop);
+
+        // Workspace notebooks can be committed to the fork; tutorials/community
+        // are ephemeral, so no Save for them.
+        const section = form.querySelector('input[name="section"]');
+        if (section && section.value === 'workspace') {
+            const save = document.createElement('button');
+            save.type = 'button';
+            save.className = 'btn btn-save launched-extra';
+            save.textContent = 'Save';
+            save.title = 'Commit this notebook to your fork';
+            save.addEventListener('click', () => saveNotebook(save, form));
+            row.appendChild(save);
+        }
+    }
+
+    // Commit one running notebook's workspace to the fork via the admin, which
+    // syncs that pod (per-notebook, so it can't clobber another pod's edits).
+    async function saveNotebook(saveBtn, form) {
+        const original = saveBtn.textContent;
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<span class="spinner-inline"></span>';
+        try {
+            const resp = await fetch('/workspace/save', {
+                method: 'POST',
+                body: new FormData(form),
+                headers: { Accept: 'application/json' },
+            });
+            const payload = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(payload.error || ('HTTP ' + resp.status));
+            saveBtn.textContent = payload.status === 'clean' ? 'No changes' : 'Saved ✓';
+            setTimeout(() => { saveBtn.textContent = original; saveBtn.disabled = false; }, 2500);
+        } catch (err) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = original;
+            alert('Save failed: ' + err.message);
+        }
     }
 
     // Deactivate a running per-notebook pod. Reuses the launch form's hidden
@@ -228,6 +267,36 @@
         handleLaunch(form);
     });
 
+    // Delete a workspace notebook from the fork. Delegated so freshly created
+    // tiles get it too. Confirm (destructive), POST, then drop the tile.
+    async function deleteNotebook(btn) {
+        const slug = btn.dataset.deleteSlug;
+        if (!confirm(`Delete notebook "${slug}"? This removes it from your fork.`)) return;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-inline"></span>';
+        try {
+            const resp = await fetch('/workspace/delete', {
+                method: 'POST',
+                body: new URLSearchParams({ slug }),
+                headers: { Accept: 'application/json' },
+            });
+            const payload = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(payload.error || ('HTTP ' + resp.status));
+            btn.closest('.tile').remove();
+        } catch (err) {
+            btn.disabled = false;
+            btn.textContent = 'Delete';
+            alert('Delete failed: ' + err.message);
+        }
+    }
+
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-delete-slug]');
+        if (!btn) return;
+        e.preventDefault();
+        deleteNotebook(btn);
+    });
+
     // Find a tile's launch form by slug + mode (both are hidden inputs).
     function findLaunchForm(slug, mode) {
         return Array.from(document.querySelectorAll('form.launch-form')).find(
@@ -285,6 +354,36 @@
             } finally {
                 button.disabled = false;
                 button.textContent = originalLabel;
+            }
+        });
+    }
+
+    // Global control: delete deployments for notebooks the user has stopped.
+    const cleanupBtn = document.getElementById('cleanup-btn');
+    if (cleanupBtn) {
+        const BROOM = '🧹';
+        const defaultTip = cleanupBtn.dataset.tooltip;
+        cleanupBtn.addEventListener('click', async () => {
+            cleanupBtn.disabled = true;
+            cleanupBtn.innerHTML = '<span class="spinner-inline"></span>';
+            try {
+                const resp = await fetch('/workspace/cleanup', {
+                    method: 'POST',
+                    headers: { Accept: 'application/json' },
+                });
+                const payload = await resp.json().catch(() => ({}));
+                if (!resp.ok) throw new Error(payload.error || ('HTTP ' + resp.status));
+                cleanupBtn.textContent = '✓';
+                cleanupBtn.dataset.tooltip = 'Removed ' + payload.count;
+                setTimeout(() => {
+                    cleanupBtn.textContent = BROOM;
+                    cleanupBtn.dataset.tooltip = defaultTip;
+                    cleanupBtn.disabled = false;
+                }, 2000);
+            } catch (err) {
+                cleanupBtn.textContent = BROOM;
+                cleanupBtn.disabled = false;
+                alert('Cleanup failed: ' + err.message);
             }
         });
     }

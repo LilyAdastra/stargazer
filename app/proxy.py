@@ -41,6 +41,7 @@ spec: [docs/architecture/app.md](../docs/architecture/app.md)
 import asyncio
 import os
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -58,8 +59,59 @@ MARIMO_HOST = "127.0.0.1"
 MARIMO_HTTP_PORT = 8081
 WORKSPACE_ROOT = Path("/workspace")
 WORKSPACE_NOTEBOOK_DIR = WORKSPACE_ROOT / "src/stargazer/notebooks/workspace"
+WORKSPACE_REL = "src/stargazer/notebooks/workspace"
 
-asgi_app = FastAPI(title="stargazer-notebook-proxy", docs_url=None, redoc_url=None)
+
+def _sync_workspace() -> tuple[dict, int]:
+    """git add + commit + push the workspace dir to the user's fork.
+
+    Returns `(payload, http_status)`. `{"status": "clean"}` means there were
+    no on-disk changes to push. Shared by the `/__sg__/workspace/sync` route
+    and the shutdown hook so manual Save and scale-to-zero use one code path.
+    """
+    if not (WORKSPACE_ROOT / ".git").exists():
+        return {"error": "workspace not initialized"}, 409
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(WORKSPACE_ROOT), *args], capture_output=True, text=True
+        )
+
+    add = git("add", WORKSPACE_REL)
+    if add.returncode != 0:
+        return {"error": "git add failed", "stderr": add.stderr}, 500
+    status = git("status", "--porcelain", WORKSPACE_REL)
+    if not status.stdout.strip():
+        return {"status": "clean"}, 200
+    commit = git("commit", "-m", "workspace: sync from notebook session")
+    if commit.returncode != 0:
+        return {"error": "git commit failed", "stderr": commit.stderr}, 500
+    push = git("push", "origin", "HEAD:main")
+    if push.returncode != 0:
+        return {"error": "git push failed", "stderr": push.stderr}, 500
+    return {"status": "pushed"}, 200
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """On shutdown (Knative SIGTERM at scale-to-zero), flush pending edits.
+
+    `/workspace` is ephemeral, so anything not pushed before the pod idles is
+    lost. uvicorn runs as PID 1 (the launch script `exec`s it), so it receives
+    SIGTERM and runs this hook — unlike the launch script's shell trap, which
+    `exec` discards.
+    """
+    yield
+    try:
+        payload, _code = await asyncio.to_thread(_sync_workspace)
+        print(f"[sg] workspace shutdown sync: {payload}")
+    except Exception as exc:  # never block shutdown
+        print(f"[sg] workspace shutdown sync failed: {exc}")
+
+
+asgi_app = FastAPI(
+    title="stargazer-notebook-proxy", docs_url=None, redoc_url=None, lifespan=lifespan
+)
 
 
 def _cookie_is_valid(cookie_value: str | None) -> bool:
@@ -83,11 +135,12 @@ def _cookie_is_valid(cookie_value: str | None) -> bool:
 async def redeem_launch_token(request: Request, call_next):
     """Convert an `?sg_launch=<token>` URL into a host-only session cookie.
 
-    The admin app at `admin-…<parent>` cannot share its session cookie with
-    this per-notebook host at `nb-…<parent>` — browsers won't honor
-    `Domain=<bare-tld-ish>` like `localhost`. So `/launch` redirects here
-    with the signed session value as a one-shot query param; we set our own
-    host-only cookie and bounce the browser to the clean URL.
+    The admin app at `admin-…<parent>` and this per-notebook host at
+    `nb-…<parent>` are sibling subdomains that intentionally use host-only
+    cookies (no shared `Domain=` parent), so a notebook can't read the admin's
+    cookie. So `/launch` redirects here with the signed session value as a
+    one-shot query param; we set our own host-only cookie and bounce the
+    browser to the clean URL.
     """
     token = request.query_params.get(LAUNCH_QUERY_PARAM)
     if not token or not _cookie_is_valid(token):
@@ -133,10 +186,10 @@ async def ready() -> Response:
     """Probe local marimo on 127.0.0.1:8081; 200 if reachable, else 503.
 
     Polled cross-origin from the dashboard JS so the spinner can resolve
-    once the pod is actually serving. Devbox-style URLs (e.g.
-    `…localhost:30081`) only resolve on the developer's machine, so the
-    probe has to come from the browser, not from the admin pod. Hence
-    the `Access-Control-Allow-Origin: *` header — readiness leaks no
+    once the pod is actually serving. The probe runs from the browser (which
+    already has a route to the notebook URL) rather than the admin pod, so
+    readiness is judged from the same vantage point the user will open from.
+    Hence the `Access-Control-Allow-Origin: *` header — readiness leaks no
     data so wildcard is fine. Unauthenticated by design.
     """
     headers = {"Access-Control-Allow-Origin": "*"}
@@ -167,45 +220,16 @@ async def workspace_list(request: Request) -> Response:
 
 @asgi_app.post("/__sg__/workspace/sync")
 async def workspace_sync(request: Request) -> Response:
-    """Commit + push any pending workspace edits to the user's fork.
+    """Commit + push pending workspace edits to the user's fork (manual Save).
 
-    Skips the cookie check when called via loopback by the local SIGTERM
-    hook (no browser session available), keyed off the `X-Sg-Reason`
-    header the launch script sets.
+    Invoked by the admin app's `/workspace/save` with the user's session
+    cookie. Idle/shutdown flushes go through the proxy's `lifespan` hook
+    instead, which calls `_sync_workspace` directly (no HTTP round-trip).
     """
-    internal = request.headers.get("X-Sg-Reason") == "notebook-shutdown"
-    if not internal and not _cookie_is_valid(request.cookies.get(SESSION_COOKIE)):
+    if not _cookie_is_valid(request.cookies.get(SESSION_COOKIE)):
         return Response("Unauthorized", status_code=401)
-    if not (WORKSPACE_ROOT / ".git").exists():
-        return JSONResponse({"error": "workspace not initialized"}, status_code=409)
-
-    def git(*args: str) -> subprocess.CompletedProcess:
-        """Run a git command rooted at the workspace, capturing output."""
-        return subprocess.run(
-            ["git", "-C", str(WORKSPACE_ROOT), *args],
-            capture_output=True,
-            text=True,
-        )
-
-    add = git("add", "src/stargazer/notebooks/workspace")
-    if add.returncode != 0:
-        return JSONResponse(
-            {"error": "git add failed", "stderr": add.stderr}, status_code=500
-        )
-    status = git("status", "--porcelain", "src/stargazer/notebooks/workspace")
-    if not status.stdout.strip():
-        return JSONResponse({"status": "clean"})
-    commit = git("commit", "-m", "workspace: sync from notebook session")
-    if commit.returncode != 0:
-        return JSONResponse(
-            {"error": "git commit failed", "stderr": commit.stderr}, status_code=500
-        )
-    push = git("push", "origin", "HEAD:main")
-    if push.returncode != 0:
-        return JSONResponse(
-            {"error": "git push failed", "stderr": push.stderr}, status_code=500
-        )
-    return JSONResponse({"status": "pushed"})
+    payload, code = await asyncio.to_thread(_sync_workspace)
+    return JSONResponse(payload, status_code=code)
 
 
 # ---------------------------------------------------------------------------

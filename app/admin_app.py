@@ -60,6 +60,7 @@ from stargazer.config import (
 
 from app.github import (
     create_workspace_notebook,
+    delete_workspace_notebook,
     fork_upstream,
     get_workspace_notebook,
     is_genuine_fork,
@@ -101,10 +102,13 @@ from app.templates import templates
 # Flyte AppEnvironment for the admin app itself.
 # ---------------------------------------------------------------------------
 
-# Devbox secret-injection workaround: AppEnvironment `secrets=[...]` is a
-# no-op on App pods (no `inject-flyte-secrets` label). Bake OAuth secrets
-# from the deployer's local shell into `env_vars`. Export them before
-# `python -m app.admin_app`.
+# AppEnvironment `secrets=[...]` is silently dropped on App pods in this Flyte
+# build: flyte-binary stamps neither the secret annotations nor the
+# `inject-flyte-secrets` label onto the Knative pod, so the injection webhook
+# never fires (verified empirically — the rendered ksvc pod template carries
+# only autoscaling annotations). Until Flyte wires up App secrets, bake the
+# OAuth secrets from the deployer's shell into `env_vars`; the trade-off is the
+# values then live in the App spec. Export them before `python -m app.admin_app`.
 # See .opencode/reference/devbox_workarounds.md
 _SECRET_NAMES = ("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "SESSION_SECRET")
 _RUNTIME_SECRETS = {
@@ -161,12 +165,10 @@ app_env = flyte.app.AppEnvironment(
 
 
 # `_launched[github_username][(slug, mode)]` is the public endpoint URL of
-# every per-notebook pod the user has spawned at least once. Used by:
-#   - `/launch/status` to probe `<endpoint>/__sg__/ready` for the dashboard
-#     spinner (the in-cluster `.svc.cluster.local` DNS pattern was unreliable
-#     across cluster configs; going through the same URL the browser uses
-#     sidesteps the question entirely).
-#   - `/__sg__/workspace/list` queries when rendering the dashboard.
+# every per-notebook pod the user has spawned at least once. Used by
+# `/__sg__/workspace/list` queries when rendering the dashboard. (Live run
+# state for the spinner comes from the cluster via `/launch/status`'s
+# `App.get` calls, not from this registry.)
 # In-memory only — admin restarts clear it; users would then re-click Edit/Run
 # to repopulate.
 _launched: dict[str, dict[tuple[str, str], str]] = defaultdict(dict)
@@ -257,6 +259,24 @@ async def _resolve_workspace_files(
     except Exception as exc:
         logger.warning(f"GitHub workspace listing failed: {exc}")
         return []
+
+
+async def _candidate_slugs(session: SessionData, cookie_value: str) -> list[str]:
+    """All notebook slugs whose per-notebook apps a user might have.
+
+    Registry Tutorials/Community plus the user's Workspace notebooks (seeds
+    excluded). Shared by `/launch/status` and `/workspace/cleanup` to bound
+    the set of `nb-{slug}-{mode}` apps they query.
+    """
+    slugs = [n.slug for n in NOTEBOOKS]
+    if session.workspace_enabled:
+        files = await _resolve_workspace_files(session, cookie_value)
+        slugs += [
+            slug
+            for f in files
+            if (slug := f.removesuffix(".py")) not in SEED_SLUGS
+        ]
+    return slugs
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +565,50 @@ async def workspace_create(
     return JSONResponse({"slug": slug, "tile_html": tile_html})
 
 
+@asgi_app.post("/workspace/delete")
+async def workspace_delete(request: Request, slug: str = Form(...)):
+    """Delete a workspace notebook from the user's fork.
+
+    Removes `<slug>.py` from the fork's `main` (idempotent — a file that's
+    already gone still returns 200) and best-effort deactivates any running
+    edit/run pod for that slug, so a deleted notebook can't orphan a pod with
+    no tile left to Stop it.
+    """
+    session = _get_session(request)
+    if session is None:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    if not session.workspace_enabled:
+        return JSONResponse(
+            {"error": "enable workspace saving first"}, status_code=403
+        )
+    if _notebook_slug(slug) != slug:
+        return JSONResponse(
+            {"error": f"invalid or reserved notebook: {slug!r}"}, status_code=400
+        )
+
+    project = sanitize_project_id(session.github_username)
+    # Tear down any running pod first; best-effort, never fails the delete.
+    for mode in ("edit", "run"):
+        try:
+            app = await App.get.aio(
+                name=f"nb-{slug}-{mode}", project=project, domain="development"
+            )
+            await app.deactivate.aio()
+        except Exception:
+            pass
+        _launched.get(session.github_username, {}).pop((slug, mode), None)
+
+    try:
+        await delete_workspace_notebook(
+            session.fork_full_name, session.access_token, f"{slug}.py"
+        )
+    except Exception as exc:
+        logger.error(f"Notebook delete failed for {slug!r}: {exc}")
+        return JSONResponse({"error": f"delete failed: {exc}"}, status_code=502)
+
+    return JSONResponse({"status": "deleted", "slug": slug})
+
+
 @asgi_app.post("/launch")
 async def launch(
     request: Request,
@@ -614,19 +678,41 @@ async def launch(
     )
     env.env_vars["FLYTE_PROJECT"] = project
 
-    deployment = await flyte.with_servecontext(
-        project=project, domain="development"
-    ).serve.aio(env)
-    _launched[session.github_username][(slug, mode)] = deployment.endpoint
+    # `serve.aio()` watches the deployment to readiness and raises if the pod
+    # is slow to schedule/boot — common on the memory-tight devbox node, where
+    # a large `[tool.stargazer]` memory request can sit Pending briefly. That's
+    # not a real failure: the route (and `App.endpoint`) exist as soon as the
+    # app is admitted, and the dashboard already polls `/__sg__/ready`. So on a
+    # watch error, recover the endpoint and hand off anyway; only error out if
+    # the app genuinely isn't there yet.
+    try:
+        deployment = await flyte.with_servecontext(
+            project=project, domain="development"
+        ).serve.aio(env)
+        endpoint = deployment.endpoint
+    except Exception as exc:
+        logger.warning(f"serve watch unconfirmed for {slug!r}/{mode!r}: {exc}")
+        try:
+            app = await App.get.aio(
+                name=f"nb-{slug}-{mode}", project=project, domain="development"
+            )
+            endpoint = app.endpoint
+        except Exception:
+            endpoint = None
+        if not endpoint:
+            return JSONResponse(
+                {"error": "notebook is still starting; please retry in a moment"},
+                status_code=503,
+            )
+    _launched[session.github_username][(slug, mode)] = endpoint
 
     # Hand off the signed session as a one-shot query param. The admin and the
-    # per-notebook live on sibling subdomains; browsers won't share the
-    # admin's host-only cookie with the per-notebook host, and `Domain=` on
-    # a bare TLD-like parent (`localhost`) is unreliable across browsers. The
-    # proxy validates `sg_launch` on first hit, sets its own host-only
-    # cookie, and 302s back to the clean URL.
+    # per-notebook live on sibling subdomains and intentionally use host-only
+    # cookies (no shared `Domain=` parent) so a notebook can't read the admin's
+    # cookie. The proxy validates `sg_launch` on first hit, sets its own
+    # host-only cookie, and 302s back to the clean URL.
     launch_token = request.cookies.get(SESSION_COOKIE, "")
-    handoff = f"{deployment.endpoint}?sg_launch={launch_token}"
+    handoff = f"{endpoint}?sg_launch={launch_token}"
 
     # AJAX clients get the URL as JSON immediately so the dashboard tile can
     # start polling `/launch/status` for readiness and swap the spinner for
@@ -679,16 +765,8 @@ async def launch_status(request: Request):
     if session is None:
         return JSONResponse({"error": "not authenticated"}, status_code=401)
     project = sanitize_project_id(session.github_username)
-
-    slugs = [n.slug for n in NOTEBOOKS]
-    if session.workspace_enabled:
-        cookie_value = request.cookies.get(SESSION_COOKIE, "")
-        files = await _resolve_workspace_files(session, cookie_value)
-        slugs += [
-            slug
-            for f in files
-            if (slug := f.removesuffix(".py")) not in SEED_SLUGS
-        ]
+    cookie_value = request.cookies.get(SESSION_COOKIE, "")
+    slugs = await _candidate_slugs(session, cookie_value)
 
     async def _probe(slug: str, mode: str) -> dict | None:
         """Return run info for `nb-{slug}-{mode}` if it's active, else None."""
@@ -705,6 +783,96 @@ async def launch_status(request: Request):
     probes = [_probe(slug, mode) for slug in slugs for mode in ("edit", "run")]
     running = [r for r in await asyncio.gather(*probes) if r is not None]
     return JSONResponse({"running": running})
+
+
+@asgi_app.post("/workspace/save")
+async def workspace_save(
+    request: Request, slug: str = Form(...), mode: str = Form(...)
+):
+    """Commit + push a running notebook's workspace to the user's fork.
+
+    Per-notebook (not global) because each pod owns its own `/workspace`
+    clone — syncing one pod can't clobber another's edits. The admin resolves
+    that pod's `App.endpoint` and calls its `/__sg__/workspace/sync`
+    (server-to-server, with the session cookie).
+    """
+    session = _get_session(request)
+    if session is None:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    if not session.workspace_enabled:
+        return JSONResponse(
+            {"error": "enable workspace saving first"}, status_code=403
+        )
+    if mode not in ("edit", "run"):
+        return JSONResponse({"error": f"invalid mode: {mode}"}, status_code=400)
+
+    project = sanitize_project_id(session.github_username)
+    try:
+        app = await App.get.aio(
+            name=f"nb-{slug}-{mode}", project=project, domain="development"
+        )
+    except Exception:
+        return JSONResponse({"error": "notebook not running"}, status_code=409)
+    if not app.is_active() or not app.endpoint:
+        return JSONResponse({"error": "notebook not running"}, status_code=409)
+
+    cookie = request.cookies.get(SESSION_COOKIE, "")
+    sync_url = f"{app.endpoint.rstrip('/')}/__sg__/workspace/sync"
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            resp = await client.post(sync_url, cookies={SESSION_COOKIE: cookie})
+    except Exception as exc:
+        logger.warning(f"Save sync failed for {slug!r}/{mode!r}: {exc}")
+        return JSONResponse(
+            {"error": f"could not reach notebook: {exc}"}, status_code=502
+        )
+    if resp.status_code != 200:
+        return JSONResponse(
+            {"error": f"sync failed (HTTP {resp.status_code})"}, status_code=502
+        )
+    try:
+        return JSONResponse(resp.json())
+    except Exception:
+        return JSONResponse({"status": "ok"})
+
+
+@asgi_app.post("/workspace/cleanup")
+async def workspace_cleanup(request: Request):
+    """Delete the user's stopped (deactivated) per-notebook app deployments.
+
+    Stopping a notebook deactivates its app but leaves the deployment record.
+    This removes those records (`App.delete`) for every deactivated
+    `nb-{slug}-{mode}` candidate in the user's project. Active/idle apps are
+    left alone. Returns the deleted app names.
+    """
+    session = _get_session(request)
+    if session is None:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    project = sanitize_project_id(session.github_username)
+    cookie_value = request.cookies.get(SESSION_COOKIE, "")
+    slugs = await _candidate_slugs(session, cookie_value)
+
+    async def _cleanup(slug: str, mode: str) -> str | None:
+        """Delete `nb-{slug}-{mode}` if it exists and is deactivated."""
+        name = f"nb-{slug}-{mode}"
+        try:
+            app = await App.get.aio(name=name, project=project, domain="development")
+        except Exception:
+            return None  # not deployed
+        if not app.is_deactivated():
+            return None
+        try:
+            await App.delete.aio(name=name, project=project, domain="development")
+            return name
+        except Exception as exc:
+            logger.warning(f"cleanup delete failed for {name!r}: {exc}")
+            return None
+
+    results = await asyncio.gather(
+        *(_cleanup(slug, mode) for slug in slugs for mode in ("edit", "run"))
+    )
+    deleted = [r for r in results if r is not None]
+    return JSONResponse({"deleted": deleted, "count": len(deleted)})
 
 
 @asgi_app.get("/health")

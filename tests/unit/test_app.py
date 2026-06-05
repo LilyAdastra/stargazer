@@ -325,6 +325,115 @@ def test_launch_status_skips_inactive_apps(secret_env, client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /workspace/save and /workspace/cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_save_requires_session(secret_env, client):
+    """Unauthenticated /workspace/save is rejected with 401."""
+    resp = client.post("/workspace/save", data={"slug": "foo", "mode": "edit"})
+    assert resp.status_code == 401
+
+
+def test_save_requires_optin(secret_env, client):
+    """Saving without workspace saving enabled is rejected with 403."""
+    _auth(client)
+    resp = client.post("/workspace/save", data={"slug": "foo", "mode": "edit"})
+    assert resp.status_code == 403
+
+
+def test_save_409_when_not_running(secret_env, client, monkeypatch):
+    """Saving a notebook with no active pod is rejected with 409."""
+    _stub_app_get(monkeypatch, {})  # App.get raises -> not running
+    _auth(client, fork_full_name="octocat/stargazer", access_token="tok")
+    resp = client.post(
+        "/workspace/save",
+        data={"slug": "foo", "mode": "edit"},
+        headers={"Accept": "application/json"},
+    )
+    assert resp.status_code == 409
+
+
+def test_save_posts_to_app_endpoint(secret_env, client, monkeypatch):
+    """Save POSTs the sync request to the notebook app's public endpoint."""
+    from app import admin_app
+
+    public = "http://nb-foo-edit-octocat-development.devbox.stargazer.bio"
+    _stub_app_get(monkeypatch, {"nb-foo-edit": _FakeApp(True, public)})
+
+    posted: dict = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def post(self, url, cookies=None):
+            posted["url"] = url
+            return SimpleNamespace(status_code=200, json=lambda: {"status": "ok"})
+
+    monkeypatch.setattr(admin_app.httpx, "AsyncClient", _FakeAsyncClient)
+
+    _auth(client, fork_full_name="octocat/stargazer", access_token="tok")
+    resp = client.post(
+        "/workspace/save",
+        data={"slug": "foo", "mode": "edit"},
+        headers={"Accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert posted["url"] == f"{public}/__sg__/workspace/sync"
+
+
+def test_cleanup_requires_session(secret_env, client):
+    """Unauthenticated /workspace/cleanup is rejected with 401."""
+    resp = client.post("/workspace/cleanup")
+    assert resp.status_code == 401
+
+
+def test_cleanup_deletes_only_deactivated_apps(secret_env, client, monkeypatch):
+    """Cleanup deletes stopped (deactivated) apps and reports their names."""
+
+    class _DeactivatedApp:
+        def is_active(self):
+            return False
+
+        def is_deactivated(self):
+            return True
+
+        @property
+        def endpoint(self):
+            return "http://x"
+
+    deleted: list = []
+    table = {"nb-assets-edit": _DeactivatedApp()}
+
+    class _Get:
+        async def aio(self, name, project, domain):
+            if name in table:
+                return table[name]
+            raise RuntimeError("not found")
+
+    class _Delete:
+        async def aio(self, name, project, domain):
+            deleted.append(name)
+
+    monkeypatch.setattr(
+        "app.admin_app.App", SimpleNamespace(get=_Get(), delete=_Delete())
+    )
+
+    _auth(client)  # workspace off -> registry candidates only
+    resp = client.post("/workspace/cleanup", headers={"Accept": "application/json"})
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": ["nb-assets-edit"], "count": 1}
+    assert deleted == ["nb-assets-edit"]
+
+
+# ---------------------------------------------------------------------------
 # /launch — workspace resource propagation
 # ---------------------------------------------------------------------------
 
@@ -524,3 +633,71 @@ def test_create_from_template_injects_resources(secret_env, client, monkeypatch)
     assert parse_notebook_resources(written["content"]) == NotebookResources(
         cpu=1, memory="2Gi"
     )
+
+
+# ---------------------------------------------------------------------------
+# /workspace/delete
+# ---------------------------------------------------------------------------
+
+
+def test_delete_requires_session(secret_env, client):
+    """Unauthenticated delete is rejected with 401."""
+    resp = client.post("/workspace/delete", data={"slug": "foo"})
+    assert resp.status_code == 401
+
+
+def test_delete_requires_optin(secret_env, client):
+    """Delete without workspace saving enabled is rejected with 403."""
+    _auth(client)  # logged in, not opted in
+    resp = client.post("/workspace/delete", data={"slug": "foo"})
+    assert resp.status_code == 403
+
+
+def test_delete_rejects_seed_slug(secret_env, client):
+    """Deleting a shipped seed (blank/template) is rejected with 400."""
+    _auth(client, fork_full_name="octocat/stargazer", access_token="tok")
+    resp = client.post("/workspace/delete", data={"slug": "template"})
+    assert resp.status_code == 400
+
+
+def test_delete_removes_notebook(secret_env, client, monkeypatch):
+    """Delete removes the file from the fork and reports the slug."""
+    deleted: dict = {}
+
+    async def fake_delete(repo, token, filename, message=None):
+        deleted.update(repo=repo, filename=filename)
+        return True
+
+    monkeypatch.setattr(
+        "app.admin_app.delete_workspace_notebook", fake_delete, raising=False
+    )
+    _stub_app_get(monkeypatch, {})  # no running pod to deactivate
+    _auth(client, fork_full_name="octocat/stargazer", access_token="tok")
+    resp = client.post(
+        "/workspace/delete",
+        data={"slug": "my-analysis"},
+        headers={"Accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["slug"] == "my-analysis"
+    assert deleted == {"repo": "octocat/stargazer", "filename": "my-analysis.py"}
+
+
+def test_delete_idempotent_when_missing(secret_env, client, monkeypatch):
+    """Deleting a notebook absent from the fork still succeeds (idempotent)."""
+
+    async def fake_delete(repo, token, filename, message=None):
+        return False  # file not found on the fork
+
+    monkeypatch.setattr(
+        "app.admin_app.delete_workspace_notebook", fake_delete, raising=False
+    )
+    _stub_app_get(monkeypatch, {})
+    _auth(client, fork_full_name="octocat/stargazer", access_token="tok")
+    resp = client.post(
+        "/workspace/delete",
+        data={"slug": "ghost"},
+        headers={"Accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["slug"] == "ghost"

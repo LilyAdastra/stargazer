@@ -39,7 +39,7 @@ There is no single host/IP that's reachable from both the laptop and from in-clu
 
 **Symptom:** Secret registered with `flyte create secret`, declared on the `AppEnvironment` via `secrets=[flyte.Secret(...)]`, never reaches the running container. `os.environ["MY_SECRET"]` raises `KeyError`.
 
-**Cause:** The injection webhook (`flyte-binary-webhook`) requires the pod label `inject-flyte-secrets: "true"`. Task pods get this label automatically; **App pods (Knative-managed) do not**, so the webhook skips them.
+**Cause:** `secrets=[...]` is dropped at the flyte-binary → Knative translation — **not** merely the missing label. Verified by deploying an AppEnvironment with `secrets=[flyte.Secret(...)]` and inspecting the rendered ksvc: `kubectl get ksvc <app> -n flyte -o jsonpath='{.spec.template.metadata.annotations}'` shows only `autoscaling.knative.dev/*` — no secret annotations and no `inject-flyte-secrets` label. The `flyte-binary-webhook` (`failurePolicy: Fail`, `objectSelector matchLabels: inject-flyte-secrets=true`) injects from pod *annotations*, so with neither annotation nor label present **no cluster-side webhook change can rescue it** — there is nothing for the webhook to act on. This is a Flyte App-serving limitation, reproducible on any cluster, not a pure devbox quirk.
 
 **Workaround:** Bake secret values into `env_vars={...}` from the deployer's local shell at deploy time. Example in `app/admin_app.py`:
 
@@ -51,9 +51,9 @@ _RUNTIME_SECRETS = {
 app_env = flyte.app.AppEnvironment(..., env_vars=_RUNTIME_SECRETS)
 ```
 
-Deployer must `export GITHUB_CLIENT_ID=…` etc. before `python -m app.admin_app`. Trade-off: secret values live in the App spec stored by Flyte. Acceptable on devbox; revisit for prod.
+Deployer must `export GITHUB_CLIENT_ID=…` etc. before `python -m app.admin_app`. **Trade-off / prod gap:** secret values are stored in the App spec in Flyte's DB. This is the one accepted parity gap in `app/` — revisit when Flyte supports App-pod secret injection (then switch to `secrets=[flyte.Secret(key=…, as_env_var=…)]` and drop the baking).
 
-Alternative (verbose): attach a `pod_template=PodTemplate(labels={"inject-flyte-secrets": "true"}, ...)` with a full V1PodSpec whose primary container is named `"app"`.
+Paths investigated and rejected: (a) `pod_template=PodTemplate(labels={"inject-flyte-secrets": "true"})` — even with the label the webhook has no secret annotations to inject, because flyte-binary never stamps them on App pods; (b) relaxing the webhook `objectSelector` — same reason, and `failurePolicy: Fail` makes a match-all selector dangerous (a webhook blip would block all pod scheduling).
 
 ---
 
@@ -71,6 +71,20 @@ docker exec flyte-devbox sed -i \
   /var/lib/rancher/k3s/server/manifests/flyte.yaml
 docker exec flyte-devbox kubectl rollout restart deployment/flyte-binary -n flyte
 ```
+
+**The restart races the addon controller — you usually need to restart twice.** Editing the manifest file triggers the k3s Addon controller to re-render the `flyte-binary-config` ConfigMap, but that's async. A `rollout restart` issued right after the `sed` will often boot a flyte-binary pod that mounts the *old* ConfigMap, and flyte-binary reads config only once at startup — so freshly-deployed App pods still get `FLYTE_AWS_ENDPOINT: http://rustfs.flyte:9000` even though the manifest file is patched. The deploy fails identically and looks like the patch didn't take.
+
+Verify the live ConfigMap (not the manifest file) reflects the change, *then* restart again:
+
+```bash
+# confirm the ConfigMap the controller actually serves is patched
+docker exec flyte-devbox kubectl get cm flyte-binary-config -n flyte -o yaml | grep -nE 'rustfs.*:9000'
+# all hits should read rustfs-svc.flyte; then restart so flyte-binary loads it
+docker exec flyte-devbox kubectl rollout restart deployment/flyte-binary -n flyte
+docker exec flyte-devbox kubectl rollout status deployment/flyte-binary -n flyte --timeout=120s
+```
+
+To diagnose: check the actual env on a failed App pod — `kubectl get pod <pod> -n flyte -o yaml | grep -A1 FLYTE_AWS_ENDPOINT`. If it shows the bare `rustfs.flyte` while the ConfigMap shows `rustfs-svc.flyte`, flyte-binary is running stale config; restart it again. Delete the failed ksvc (`kubectl delete ksvc admin-app-flytesnacks-development -n flyte`) before redeploying so you get a clean revision.
 
 ---
 
@@ -111,6 +125,66 @@ docker exec flyte-devbox kubectl rollout restart deployment/flyte-binary -n flyt
 **Cause:** `flyte.remote.App.url` is documented as "the console URL for viewing the app" (i.e. the Flyte Console deep-link) — not the user-facing endpoint. The user-facing URL lives on `App.endpoint` (`status.ingress.public_url`). The SDK's own log line `"Deployed App ..., you can check the console at {deployed.url}"` is the giveaway. Not devbox-specific but easy to miss.
 
 **Workaround:** Use `app.endpoint` whenever you mean "the URL a browser should hit." Reserve `app.url` for linking into the Flyte console.
+
+---
+
+## Serving domain must not be `.localhost` (so `App.endpoint` resolves in-cluster)
+
+**Symptom:** A pod (e.g. the admin app) calling another App's `App.endpoint` over HTTP fails with `[Errno -2] Name or service not known` / `[Errno -5] No address associated with hostname`. Example: notebook Save (`POST /workspace/save` → notebook pod's `/__sg__/workspace/sync`) returned `could not reach notebook: ...`. (The admin App is Knative-scaled-to-zero between requests, so the failing call runs in a freshly-activated *pod*, not on the laptop — easy to misdiagnose as a local issue.)
+
+**Cause:** Stock devbox serves apps under the `localhost` TLD, so `App.endpoint` is `http://{ksvc}.localhost:30081`. Two compounding problems: (1) cluster DNS doesn't know `*.localhost`; (2) more fundamentally, **glibc special-cases the `.localhost` TLD and never sends it to a nameserver at all** (`getaddrinfo('x.localhost')` → EAI_NODATA / EAI_NONAME without a single DNS query), so *no* CoreDNS change can fix `.localhost`. The fix is to move apps off `.localhost` onto a normal domain (here `devbox.stargazer.bio` — needs no real public DNS records) and make that domain resolve in-cluster. Then app code uses `App.endpoint` everywhere with **zero devbox branches**.
+
+**Two hostnames must agree.** kourier routes by the request `Host`, so the Knative *route* host and Flyte's *`App.endpoint`* host must be the same domain or you get a 404 / no-route:
+- **Knative `config-domain`** (`knative-serving` ns) sets the ksvc route host → `{ksvc}.{domain}`.
+- **Flyte `internalApps.baseDomain`** (in `flyte-binary-config`'s `100-inline-config.yaml`) sets `App.endpoint` → `http://{ksvc}.{baseDomain}:{ingressAppsPort}`. `App.endpoint` is computed live from this — flyte-binary restart picks it up, **no app redeploy needed**. `ingressAppsPort: 30081` is the kourier NodePort (kept as-is so the laptop entrypoint is unchanged).
+
+**Workaround (ad-hoc devbox steps, no app code).** Both domain values live in the k3s addon manifest, so patch the source (`kubectl edit` on the live ConfigMaps reverts):
+
+```bash
+# 1a. Knative route domain
+docker exec flyte-devbox sed -i 's|^  localhost: ""|  devbox.stargazer.bio: ""|' \
+  /var/lib/rancher/k3s/server/manifests/flyte.yaml
+# 1b. Flyte App.endpoint domain
+docker exec flyte-devbox sed -i 's|baseDomain: localhost|baseDomain: devbox.stargazer.bio|' \
+  /var/lib/rancher/k3s/server/manifests/flyte.yaml
+```
+
+The addon controller re-applies within ~10s (it races — poll the live ConfigMaps before restarting):
+`kubectl get cm config-domain -n knative-serving -o jsonpath='{.data}'` → `{"devbox.stargazer.bio":""}` and `kubectl get cm flyte-binary-config -n flyte -o yaml | grep baseDomain` → `devbox.stargazer.bio`. Then `kubectl rollout restart deployment/flyte-binary -n flyte` (Knative reconciles ksvc route URLs on its own).
+
+2. Make `*.{domain}` resolve **to the node IP** inside the cluster (so the `:30081` NodePort is reachable from pods) via a `coredns-custom` server block. k3s CoreDNS imports `/etc/coredns/custom/*.server`. The node IP is hardcoded (re-apply on cluster recreate); fetch it at apply time:
+
+```bash
+NODEIP=$(docker exec flyte-devbox kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+docker exec -i flyte-devbox kubectl apply -f - <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: coredns-custom, namespace: kube-system }
+data:
+  devbox-domain.server: |
+    devbox.stargazer.bio:53 {
+        template IN A    { match .*\.devbox\.stargazer\.bio\.$ ; answer "{{ .Name }} 60 IN A $NODEIP" }
+        template IN AAAA { match .*\.devbox\.stargazer\.bio\.$ ; rcode NOERROR }
+    }
+YAML
+docker exec flyte-devbox kubectl rollout restart deployment/coredns -n kube-system
+```
+
+Why node IP and not the kourier ClusterIP: `App.endpoint` carries `:30081`, which is a NodePort — only reachable on a node IP, not on a ClusterIP (which listens on 80). kourier still routes by the public `Host`, so resolving to the node IP and hitting `:30081` works. The AAAA template returns NOERROR-empty so glibc (AF_UNSPEC) falls back to the A record cleanly.
+
+**Verify** from a throwaway pod (`kubectl run t --image=localhost:30000/notebook-app:latest --command -- sleep 200`):
+`getaddrinfo('{ksvc}.devbox.stargazer.bio', 30081)` → node IP, and `GET http://{ksvc}.devbox.stargazer.bio:30081/health` → 200.
+
+**Laptop side:** the browser already reached `*.localhost:30081` via 127.0.0.1 + the published `:30081` docker port; only the hostname changes. Point `*.devbox.stargazer.bio` → `127.0.0.1` with a wildcard resolver (the published `:30081` port is unchanged). No real public DNS records are needed — CoreDNS handles pods, the local resolver handles the laptop:
+
+```bash
+brew install dnsmasq
+echo 'address=/devbox.stargazer.bio/127.0.0.1' >> $(brew --prefix)/etc/dnsmasq.conf
+sudo brew services start dnsmasq
+sudo mkdir -p /etc/resolver
+printf 'nameserver 127.0.0.1\n' | sudo tee /etc/resolver/devbox.stargazer.bio
+# verify: scutil --dns | grep -A1 devbox.stargazer.bio ; ping -c1 anything.devbox.stargazer.bio  -> 127.0.0.1
+```
 
 ---
 

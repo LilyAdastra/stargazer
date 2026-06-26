@@ -26,7 +26,7 @@ spec: [docs/architecture/notebook.md](../../docs/architecture/notebook.md)
 
 import marimo
 
-__generated_with = "0.21.1"
+__generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
 
@@ -46,15 +46,7 @@ def _():
 
     mo.md(
         """
-        # Bring Your Own Data — Skeleton
-
-        Five fillable sections: **asset → upload → task → workflow → run**.
-        Defaults work as-is (your file round-trips through a no-op
-        pipeline). Replace the TODOs to make it do real work.
-
-        Reference: [`assets_tutorial.py`](./assets_tutorial.py) for
-        asset internals, [`tasks_tutorial.py`](./tasks_tutorial.py)
-        for tasks/workflows and the local→remote toggle.
+        poop
         """
     )
     return ClassVar, Path, asyncio, dataclass, flyte, mo, tempfile
@@ -88,8 +80,7 @@ def _(ClassVar, dataclass):
         # sample_id: str = ""
         # n_records: int = 0
         # source: str = ""
-
-    return Asset, MyAsset
+    return (MyAsset,)
 
 
 @app.cell
@@ -243,3 +234,5 @@ async def _(mo, my_asset, my_workflow):
 
 if __name__ == "__main__":
     app.run()
+
+# sigterm-flush-verify-1782439294

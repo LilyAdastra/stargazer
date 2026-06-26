@@ -9,8 +9,8 @@
 # stargazer = { path = "/stargazer", editable = true }
 #
 # [tool.stargazer]
-# cpu = 2
-# memory = "4Gi"
+# cpu = 1
+# memory = "1Gi"
 # ///
 """
 ### Workspace template — barebones notebook skeleton.
